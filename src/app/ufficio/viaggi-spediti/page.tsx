@@ -3,14 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
-type Trip = {
-  id: string;
-  trip_date: string; // YYYY-MM-DD
-  status: "OPEN" | "SHIPPED";
-  shipped_at: string | null;
-};
+type TripRel = { trip_date: string };
 
-type Pallet = {
+type PalletRow = {
   id: string;
   client: string;
   pallet_no: string;
@@ -19,9 +14,31 @@ type Pallet = {
   dimensions: string | null;
   trip_id: string | null;
   sent_at: string | null;
+  trips: TripRel[] | null; // join array
 };
 
-function fmtDate(d: string) {
+async function getOrCreateTripId(tripDate: string): Promise<string> {
+  const found = await supabase
+    .from("trips")
+    .select("id")
+    .eq("trip_date", tripDate)
+    .eq("status", "OPEN")
+    .limit(1);
+
+  if (found.error) throw found.error;
+  if (found.data && found.data.length > 0) return found.data[0].id as string;
+
+  const created = await supabase
+    .from("trips")
+    .insert({ trip_date: tripDate, status: "OPEN" })
+    .select("id")
+    .single();
+
+  if (created.error) throw created.error;
+  return created.data.id as string;
+}
+
+function fmtDateLabel(d: string) {
   try {
     const dt = new Date(d + "T00:00:00");
     return new Intl.DateTimeFormat("it-IT", {
@@ -35,44 +52,40 @@ function fmtDate(d: string) {
   }
 }
 
-function parseDims(s: string | null) {
-  if (!s) return { l: "", p: "", h: "" };
-  const parts = s.split("x").map((v) => v.trim());
-  return { l: parts[0] ?? "", p: parts[1] ?? "", h: parts[2] ?? "" };
+function prettyDims(dim: string | null) {
+  if (!dim) return "—";
+  const parts = dim.split("x").map((s) => s.trim()).filter(Boolean);
+  if (parts.length !== 3) return dim;
+  return `${parts[0]} × ${parts[1]} × ${parts[2]}`;
 }
 
 export default function UfficioViaggiSpeditiPage() {
   const [loading, setLoading] = useState(true);
-  const [trips, setTrips] = useState<Trip[]>([]);
-  const [pallets, setPallets] = useState<Pallet[]>([]);
+  const [items, setItems] = useState<PalletRow[]>([]);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Record<string, boolean>>({});
 
+  const [assignTripDate, setAssignTripDate] = useState<string>(""); // YYYY-MM-DD
+
   const selectedIds = useMemo(
-    () => Object.entries(selected).filter(([, v]) => v).map(([k]) => k),
+    () => Object.entries(selected).filter(([, v]) => v).map(([id]) => id),
     [selected]
   );
 
   async function load() {
     setLoading(true);
 
-    const tRes = await supabase
-      .from("trips")
-      .select("id, trip_date, status, shipped_at")
-      .eq("status", "SHIPPED")
-      .order("trip_date", { ascending: false });
-
-    if (tRes.error) console.error(tRes.error);
-    setTrips((tRes.data ?? []) as Trip[]);
-
-    const pRes = await supabase
+    const res = await supabase
       .from("pallets")
-      .select("id, client, pallet_no, bobbins_count, shipping_type, dimensions, trip_id, sent_at")
-      .not("sent_at", "is", null)
-      .order("client", { ascending: true });
+      .select("id, client, pallet_no, bobbins_count, shipping_type, dimensions, trip_id, sent_at, trips:trip_id(trip_date)")
+      .not("sent_at", "is", null);
 
-    if (pRes.error) console.error(pRes.error);
-    setPallets((pRes.data ?? []) as Pallet[]);
+    if (res.error) {
+      console.error(res.error);
+      setItems([]);
+    } else {
+      setItems(((res.data ?? []) as unknown) as PalletRow[]);
+    }
 
     setLoading(false);
   }
@@ -81,9 +94,7 @@ export default function UfficioViaggiSpeditiPage() {
     load();
 
     const onFocus = () => load();
-    const onVis = () => {
-      if (document.visibilityState === "visible") load();
-    };
+    const onVis = () => { if (document.visibilityState === "visible") load(); };
 
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVis);
@@ -98,12 +109,51 @@ export default function UfficioViaggiSpeditiPage() {
     setSelected((s) => ({ ...s, [id]: !s[id] }));
   }
 
+  function selectAllVisible(list: PalletRow[]) {
+    const next = { ...selected };
+    for (const p of list) next[p.id] = true;
+    setSelected(next);
+  }
+
+  function clearAllVisible(list: PalletRow[]) {
+    const next = { ...selected };
+    for (const p of list) delete next[p.id];
+    setSelected(next);
+  }
+
+  async function assignTripToSelected() {
+    if (selectedIds.length === 0) {
+      alert("Seleziona almeno un bancale.");
+      return;
+    }
+    if (!assignTripDate) {
+      alert("Seleziona una data viaggio.");
+      return;
+    }
+
+    try {
+      const tripId = await getOrCreateTripId(assignTripDate);
+
+      const { error } = await supabase
+        .from("pallets")
+        .update({ trip_id: tripId })
+        .in("id", selectedIds);
+
+      if (error) throw error;
+
+      await load();
+    } catch (err) {
+      console.error(err);
+      alert("Errore assegnazione viaggio (vedi console F12).");
+    }
+  }
+
   async function deleteSelected() {
     if (selectedIds.length === 0) {
       alert("Seleziona almeno un bancale.");
       return;
     }
-    if (!confirm(`Eliminare definitivamente ${selectedIds.length} bancali?`)) return;
+    if (!confirm(`Eliminare definitivamente ${selectedIds.length} bancali spediti?`)) return;
 
     const { error } = await supabase.from("pallets").delete().in("id", selectedIds);
     if (error) {
@@ -116,212 +166,209 @@ export default function UfficioViaggiSpeditiPage() {
     await load();
   }
 
-  async function deleteTrip(tripId: string, tripTitle: string) {
-    if (!confirm(`Eliminare definitivamente il viaggio "${tripTitle}" e TUTTI i bancali associati?`)) return;
-
-    // 1) elimina bancali del viaggio (spediti o comunque collegati)
-    const pDel = await supabase.from("pallets").delete().eq("trip_id", tripId);
-    if (pDel.error) {
-      console.error(pDel.error);
-      alert("Errore eliminazione bancali del viaggio (vedi console F12).");
-      return;
-    }
-
-    // 2) elimina viaggio
-    const tDel = await supabase.from("trips").delete().eq("id", tripId);
-    if (tDel.error) {
-      console.error(tDel.error);
-      alert("Errore eliminazione viaggio (vedi console F12).");
-      return;
-    }
-
-    setSelected({});
-    await load();
-  }
-
-  const filteredPallets = useMemo(() => {
+  const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return pallets;
+    if (!q) return items;
 
-    return pallets.filter((p) => {
+    return items.filter((p) => {
+      const tripDate = p.trips?.[0]?.trip_date ?? "";
       return (
         p.client.toLowerCase().includes(q) ||
         p.pallet_no.toLowerCase().includes(q) ||
+        tripDate.toLowerCase().includes(q) ||
         (p.dimensions ?? "").toLowerCase().includes(q)
       );
     });
-  }, [pallets, query]);
+  }, [items, query]);
 
-  const palletsByTrip = useMemo(() => {
-    const m = new Map<string, Pallet[]>();
-    for (const p of filteredPallets) {
-      const key = p.trip_id ?? "NONE";
-      if (!m.has(key)) m.set(key, []);
-      m.get(key)!.push(p);
+  const grouped = useMemo(() => {
+    const map = new Map<string, PalletRow[]>();
+
+    for (const p of filtered) {
+      const tripDate = p.trips?.[0]?.trip_date ?? "";
+      const key = tripDate ? tripDate : "SENZA_VIAGGIO";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(p);
     }
 
-    for (const [k, arr] of m.entries()) {
+    for (const [k, arr] of map.entries()) {
       arr.sort((a, b) => {
         const c = a.client.localeCompare(b.client);
         if (c !== 0) return c;
         return a.pallet_no.localeCompare(b.pallet_no);
       });
-      m.set(k, arr);
+      map.set(k, arr);
     }
 
-    return m;
-  }, [filteredPallets]);
+    const keys = Array.from(map.keys());
+    keys.sort((a, b) => {
+      if (a === "SENZA_VIAGGIO") return -1;
+      if (b === "SENZA_VIAGGIO") return 1;
+      return b.localeCompare(a); // date desc
+    });
 
-  const tripBlocks = useMemo(() => {
-    const blocks: Array<{ title: string; tripId: string; items: Pallet[] }> = [];
-
-    for (const t of trips) {
-      blocks.push({
-        title: `Viaggio: ${fmtDate(t.trip_date)}`,
-        tripId: t.id,
-        items: palletsByTrip.get(t.id) ?? [],
-      });
-    }
-
-    const none = palletsByTrip.get("NONE") ?? [];
-    if (none.length > 0) {
-      blocks.push({ title: "Senza viaggio (spediti)", tripId: "NONE", items: none });
-    }
-
-    return blocks;
-  }, [trips, palletsByTrip]);
+    return keys.map((key) => ({ key, items: map.get(key)! }));
+  }, [filtered]);
 
   return (
     <main className="space-y-6">
       <header className="space-y-3">
-        <div className="flex items-end justify-between gap-3">
+        <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">
+            <h1 className="text-2xl font-semibold tracking-tight" style={{ color: "var(--text)" }}>
               Ufficio · Viaggi spediti
             </h1>
-            <p className="text-sm text-zinc-700">
-              Solo visura + pulizia definitiva.
+            <p className="text-sm" style={{ color: "var(--muted)" }}>
+              Raggruppati per data viaggio, poi cliente. Misure corriere visibili. Assegna data e elimina.
             </p>
           </div>
 
           <button
             onClick={load}
-            className="rounded-2xl border border-zinc-200 bg-white px-4 py-2 text-sm font-semibold text-zinc-900 shadow-sm hover:bg-zinc-50 active:scale-[0.99]"
+            className="rounded-2xl border px-4 py-2 text-sm font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
+            style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
           >
             Aggiorna
           </button>
         </div>
 
         <input
-          className="w-full rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-900 placeholder:text-zinc-400 shadow-sm focus:outline-none focus:ring-2 focus:ring-black"
-          placeholder="Cerca cliente / bancale / misure…"
+          className="w-full rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+          style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+          placeholder="Cerca cliente / bancale / data / misure…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
 
-        <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm flex flex-wrap items-center justify-between gap-3">
-          <div className="text-sm text-zinc-700">
-            Selezionati: <span className="font-semibold text-zinc-900">{selectedIds.length}</span>
+        <div
+          className="rounded-3xl border p-4 shadow-sm flex flex-wrap items-center justify-between gap-3"
+          style={{ background: "var(--card)", borderColor: "var(--border)" }}
+        >
+          <div className="text-sm" style={{ color: "var(--muted)" }}>
+            Selezionati: <span style={{ color: "var(--text)", fontWeight: 700 }}>{selectedIds.length}</span>
           </div>
-          <button
-            onClick={deleteSelected}
-            className="rounded-2xl border border-red-200 bg-white px-4 py-2 text-sm font-semibold text-red-700 shadow-sm hover:bg-red-50 active:scale-[0.99]"
-          >
-            Elimina selezionati
-          </button>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => selectAllVisible(filtered)}
+              className="rounded-2xl border px-3 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+            >
+              Seleziona tutti
+            </button>
+            <button
+              onClick={() => clearAllVisible(filtered)}
+              className="rounded-2xl border px-3 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+            >
+              Deseleziona
+            </button>
+
+            <input
+              type="date"
+              value={assignTripDate}
+              onChange={(e) => setAssignTripDate(e.target.value)}
+              className="rounded-2xl border px-3 py-2 text-xs shadow-sm focus:outline-none focus:ring-2"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+              title="Data viaggio da assegnare ai selezionati"
+            />
+            <button
+              onClick={assignTripToSelected}
+              className="rounded-2xl border px-4 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+            >
+              Assegna data
+            </button>
+
+            <button
+              onClick={deleteSelected}
+              className="rounded-2xl border px-4 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
+              style={{ background: "var(--card)", borderColor: "#ef4444", color: "#ef4444" }}
+            >
+              Elimina selezionati
+            </button>
+          </div>
         </div>
       </header>
 
-      {loading && <div className="text-sm text-zinc-600">Caricamento…</div>}
+      {loading && <div className="text-sm" style={{ color: "var(--muted)" }}>Caricamento…</div>}
 
-      {!loading && tripBlocks.length === 0 && (
-        <div className="rounded-3xl border border-zinc-200 bg-white p-6 text-sm text-zinc-700 shadow-sm">
-          Nessun viaggio spedito.
+      {!loading && grouped.length === 0 && (
+        <div
+          className="rounded-3xl border p-6 text-sm shadow-sm"
+          style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--muted)" }}
+        >
+          Nessun bancale spedito.
         </div>
       )}
 
-      {!loading &&
-        tripBlocks.map((b) => (
-          <section key={b.tripId} className="space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-sm font-semibold text-zinc-900">{b.title}</div>
+      {!loading && grouped.map((g) => (
+        <section key={g.key} className="space-y-2">
+          <div className="text-sm font-semibold" style={{ color: "var(--text)" }}>
+            {g.key === "SENZA_VIAGGIO" ? "Senza viaggio" : `Viaggio: ${fmtDateLabel(g.key)}`}
+          </div>
 
-              {b.tripId !== "NONE" && (
-                <button
-                  onClick={() => deleteTrip(b.tripId, b.title)}
-                  className="rounded-2xl border border-red-200 bg-white px-3 py-2 text-xs font-semibold text-red-700 shadow-sm hover:bg-red-50 active:scale-[0.99]"
-                >
-                  Elimina viaggio (e bancali)
-                </button>
-              )}
-            </div>
+          <div className="space-y-2">
+            {g.items.map((p) => (
+              <label
+                key={p.id}
+                className="flex items-start justify-between gap-4 rounded-3xl border p-5 shadow-sm"
+                style={{ background: "var(--card)", borderColor: "var(--border)" }}
+              >
+                <div className="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    className="mt-1 h-5 w-5"
+                    checked={!!selected[p.id]}
+                    onChange={() => toggleOne(p.id)}
+                  />
 
-            {b.items.length === 0 ? (
-              <div className="rounded-3xl border border-zinc-200 bg-white p-5 text-sm text-zinc-700 shadow-sm">
-                Nessun bancale associato.
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {b.items.map((p) => {
-                  const dims = parseDims(p.dimensions);
-                  const dimsPretty =
-                    p.shipping_type === "COURIER" && dims.l && dims.p && dims.h
-                      ? `${dims.l} × ${dims.p} × ${dims.h}`
-                      : null;
-
-                  return (
-                    <label
-                      key={p.id}
-                      className="flex items-start justify-between gap-4 rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm"
-                    >
-                      <div className="flex items-start gap-3">
-                        <input
-                          type="checkbox"
-                          className="mt-1 h-5 w-5 accent-black"
-                          checked={!!selected[p.id]}
-                          onChange={() => toggleOne(p.id)}
-                        />
-
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <div className="truncate text-base font-semibold text-zinc-900">
-                              {p.client}
-                            </div>
-
-                            <span
-                              className={`rounded-full px-2 py-1 text-xs font-semibold ${
-                                p.shipping_type === "COURIER"
-                                  ? "bg-sky-100 text-sky-800"
-                                  : "bg-zinc-100 text-zinc-800"
-                              }`}
-                            >
-                              {p.shipping_type === "COURIER" ? "Corriere" : "Camion"}
-                            </span>
-                          </div>
-
-                          <div className="mt-1 text-sm text-zinc-700">
-                            Bancale <span className="font-medium">{p.pallet_no}</span> ·
-                            Bobine <span className="font-medium">{p.bobbins_count}</span>
-                          </div>
-
-                          {dimsPretty && (
-                            <div className="mt-2 text-xs text-zinc-600">
-                              Misure: <span className="font-semibold text-zinc-800">{dimsPretty}</span>
-                            </div>
-                          )}
-                        </div>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="truncate text-base font-semibold" style={{ color: "var(--text)" }}>
+                        {p.client}
                       </div>
 
-                      <span className="shrink-0 rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800">
-                        Spedito
+                      <span
+                        className="rounded-full px-2 py-1 text-xs font-semibold"
+                        style={{
+                          background: p.shipping_type === "COURIER" ? "rgba(56,189,248,0.18)" : "rgba(148,163,184,0.18)",
+                          color: "var(--text)",
+                          border: "1px solid var(--border)",
+                        }}
+                      >
+                        {p.shipping_type === "COURIER" ? "Corriere" : "Camion"}
                       </span>
-                    </label>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-        ))}
+                    </div>
+
+                    <div className="mt-1 text-sm" style={{ color: "var(--muted)" }}>
+                      Bancale <span style={{ color: "var(--text)", fontWeight: 600 }}>{p.pallet_no}</span> ·
+                      Bobine <span style={{ color: "var(--text)", fontWeight: 600 }}>{p.bobbins_count}</span>
+                    </div>
+
+                    {p.shipping_type === "COURIER" && (
+                      <div className="mt-2 text-xs" style={{ color: "var(--muted)" }}>
+                        Misure: <span style={{ color: "var(--text)", fontWeight: 700 }}>{prettyDims(p.dimensions)}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <span
+                  className="shrink-0 rounded-full border px-3 py-1 text-xs font-semibold"
+                  style={{
+                    background: "rgba(16,185,129,0.18)",
+                    color: "var(--text)",
+                    borderColor: "var(--border)",
+                  }}
+                >
+                  Spedito
+                </span>
+              </label>
+            ))}
+          </div>
+        </section>
+      ))}
     </main>
   );
 }
