@@ -2,63 +2,38 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
-
-type TripRel = { trip_date: string };
+import { fmtDateLabel, getOrCreateTripId, prettyDims } from "@/lib/trips";
 
 type PalletRow = {
   id: string;
   client: string;
   pallet_no: string;
   bobbins_count: number;
-  status: "READY" | "IN_PROGRESS";
+  status: "IN_PROGRESS" | "READY";
   shipping_type: "TRUCK" | "COURIER";
   dimensions: string | null;
   trip_id: string | null;
   sent_at: string | null;
   created_at: string;
-  trips: TripRel[] | null; // join Supabase come array
+  trip_date: string | null; // calcolata in app
 };
 
-async function getOrCreateTripId(tripDate: string): Promise<string> {
-  const found = await supabase
+async function fetchTripDateMap(tripIds: string[]) {
+  if (tripIds.length === 0) return new Map<string, string>();
+
+  const { data, error } = await supabase
     .from("trips")
-    .select("id")
-    .eq("trip_date", tripDate)
-    .eq("status", "OPEN")
-    .limit(1);
+    .select("id, trip_date")
+    .in("id", tripIds);
 
-  if (found.error) throw found.error;
-  if (found.data && found.data.length > 0) return found.data[0].id as string;
-
-  const created = await supabase
-    .from("trips")
-    .insert({ trip_date: tripDate, status: "OPEN" })
-    .select("id")
-    .single();
-
-  if (created.error) throw created.error;
-  return created.data.id as string;
-}
-
-function fmtDateLabel(d: string) {
-  try {
-    const dt = new Date(d + "T00:00:00");
-    return new Intl.DateTimeFormat("it-IT", {
-      weekday: "short",
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric",
-    }).format(dt);
-  } catch {
-    return d;
+  if (error) {
+    console.error("fetchTripDateMap error", error);
+    return new Map<string, string>();
   }
-}
 
-function prettyDims(dim: string | null) {
-  if (!dim) return "—";
-  const parts = dim.split("x").map((s) => s.trim()).filter(Boolean);
-  if (parts.length !== 3) return dim;
-  return `${parts[0]} × ${parts[1]} × ${parts[2]}`;
+  const m = new Map<string, string>();
+  for (const r of data ?? []) m.set(r.id, r.trip_date);
+  return m;
 }
 
 export default function UfficioBancaliProntiPage() {
@@ -67,7 +42,7 @@ export default function UfficioBancaliProntiPage() {
   const [query, setQuery] = useState("");
 
   const [selected, setSelected] = useState<Record<string, boolean>>({});
-  const [assignTripDate, setAssignTripDate] = useState<string>(""); // YYYY-MM-DD
+  const [assignTripDate, setAssignTripDate] = useState<string>("");
 
   const selectedIds = useMemo(
     () => Object.entries(selected).filter(([, v]) => v).map(([id]) => id),
@@ -79,9 +54,7 @@ export default function UfficioBancaliProntiPage() {
 
     const res = await supabase
       .from("pallets")
-      .select(
-        "id, client, pallet_no, bobbins_count, status, shipping_type, dimensions, trip_id, sent_at, created_at, trips:trip_id(trip_date)"
-      )
+      .select("id, client, pallet_no, bobbins_count, status, shipping_type, dimensions, trip_id, sent_at, created_at")
       .eq("status", "READY")
       .is("sent_at", null)
       .order("created_at", { ascending: false });
@@ -89,22 +62,39 @@ export default function UfficioBancaliProntiPage() {
     if (res.error) {
       console.error(res.error);
       setItems([]);
-    } else {
-      setItems(((res.data ?? []) as unknown) as PalletRow[]);
+      setLoading(false);
+      return;
     }
 
+    const raw = (res.data ?? []) as any[];
+
+    const tripIds = Array.from(new Set(raw.map(r => r.trip_id).filter(Boolean))) as string[];
+    const tripMap = await fetchTripDateMap(tripIds);
+
+    const withTrip: PalletRow[] = raw.map(r => ({
+      id: r.id,
+      client: r.client,
+      pallet_no: r.pallet_no,
+      bobbins_count: r.bobbins_count ?? 0,
+      status: r.status,
+      shipping_type: r.shipping_type,
+      dimensions: r.dimensions ?? null,
+      trip_id: r.trip_id ?? null,
+      sent_at: r.sent_at ?? null,
+      created_at: r.created_at,
+      trip_date: r.trip_id ? (tripMap.get(r.trip_id) ?? null) : null,
+    }));
+
+    setItems(withTrip);
     setLoading(false);
   }
 
   useEffect(() => {
     load();
-
     const onFocus = () => load();
     const onVis = () => { if (document.visibilityState === "visible") load(); };
-
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVis);
-
     return () => {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVis);
@@ -128,14 +118,8 @@ export default function UfficioBancaliProntiPage() {
   }
 
   async function assignTripToSelected() {
-    if (selectedIds.length === 0) {
-      alert("Seleziona almeno un bancale.");
-      return;
-    }
-    if (!assignTripDate) {
-      alert("Seleziona una data viaggio.");
-      return;
-    }
+    if (selectedIds.length === 0) return alert("Seleziona almeno un bancale.");
+    if (!assignTripDate) return alert("Seleziona una data viaggio.");
 
     try {
       const tripId = await getOrCreateTripId(assignTripDate);
@@ -148,28 +132,40 @@ export default function UfficioBancaliProntiPage() {
       if (error) throw error;
 
       await load();
-    } catch (err) {
-      console.error(err);
-      alert("Errore assegnazione viaggio (vedi console F12).");
+    } catch (e) {
+      console.error(e);
+      alert("Errore assegnazione data (F12).");
     }
   }
 
-  async function sendSelected() {
-    if (selectedIds.length === 0) {
-      alert("Seleziona almeno un bancale.");
-      return;
-    }
-    if (!confirm(`Confermi INVIO di ${selectedIds.length} bancali?`)) return;
+  async function markSentSelected() {
+    if (selectedIds.length === 0) return alert("Seleziona almeno un bancale.");
+    if (!confirm(`Inviare ${selectedIds.length} bancali? Verranno spostati tra gli spediti.`)) return;
+
+    const nowIso = new Date().toISOString();
+
+    const tripIds = Array.from(
+      new Set(items.filter(p => selected[p.id] && p.trip_id).map(p => p.trip_id as string))
+    );
 
     const { error } = await supabase
       .from("pallets")
-      .update({ sent_at: new Date().toISOString() })
+      .update({ sent_at: nowIso })
       .in("id", selectedIds);
 
     if (error) {
       console.error(error);
-      alert("Errore invio (vedi console F12).");
+      alert("Errore invio (F12).");
       return;
+    }
+
+    if (tripIds.length > 0) {
+      const t = await supabase
+        .from("trips")
+        .update({ status: "SHIPPED", shipped_at: nowIso })
+        .in("id", tripIds);
+
+      if (t.error) console.error("Trip update error", t.error);
     }
 
     setSelected({});
@@ -177,16 +173,13 @@ export default function UfficioBancaliProntiPage() {
   }
 
   async function deleteSelected() {
-    if (selectedIds.length === 0) {
-      alert("Seleziona almeno un bancale.");
-      return;
-    }
+    if (selectedIds.length === 0) return alert("Seleziona almeno un bancale.");
     if (!confirm(`Eliminare definitivamente ${selectedIds.length} bancali?`)) return;
 
     const { error } = await supabase.from("pallets").delete().in("id", selectedIds);
     if (error) {
       console.error(error);
-      alert("Errore eliminazione (vedi console F12).");
+      alert("Errore eliminazione (F12).");
       return;
     }
 
@@ -199,43 +192,35 @@ export default function UfficioBancaliProntiPage() {
     if (!q) return items;
 
     return items.filter((p) => {
-      const tripDate = p.trips?.[0]?.trip_date ?? "";
+      const td = p.trip_date ?? "";
       return (
         p.client.toLowerCase().includes(q) ||
         p.pallet_no.toLowerCase().includes(q) ||
-        tripDate.toLowerCase().includes(q) ||
+        td.toLowerCase().includes(q) ||
         (p.dimensions ?? "").toLowerCase().includes(q)
       );
     });
   }, [items, query]);
 
-  // raggruppo per data viaggio (prima senza), dentro ordino per cliente
   const grouped = useMemo(() => {
     const map = new Map<string, PalletRow[]>();
 
     for (const p of filtered) {
-      const tripDate = p.trips?.[0]?.trip_date ?? "";
-      const key = tripDate ? tripDate : "SENZA_VIAGGIO";
+      const key = p.trip_date ? p.trip_date : "SENZA_VIAGGIO";
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(p);
     }
 
     for (const [k, arr] of map.entries()) {
-      arr.sort((a, b) => {
-        const c = a.client.localeCompare(b.client);
-        if (c !== 0) return c;
-        return a.pallet_no.localeCompare(b.pallet_no);
-      });
+      arr.sort((a, b) => a.client.localeCompare(b.client));
       map.set(k, arr);
     }
 
     const keys = Array.from(map.keys());
     keys.sort((a, b) => {
-      // "Senza viaggio" sempre primo
       if (a === "SENZA_VIAGGIO") return -1;
       if (b === "SENZA_VIAGGIO") return 1;
-      // poi date discendenti
-      return b.localeCompare(a);
+      return a.localeCompare(b);
     });
 
     return keys.map((key) => ({ key, items: map.get(key)! }));
@@ -250,7 +235,7 @@ export default function UfficioBancaliProntiPage() {
               Ufficio · Bancali pronti
             </h1>
             <p className="text-sm" style={{ color: "var(--muted)" }}>
-              Raggruppati per data viaggio, poi cliente. Misure corriere visibili.
+              Raggruppati per Data viaggio → Cliente. Misure corriere visibili.
             </p>
           </div>
 
@@ -276,7 +261,7 @@ export default function UfficioBancaliProntiPage() {
           style={{ background: "var(--card)", borderColor: "var(--border)" }}
         >
           <div className="text-sm" style={{ color: "var(--muted)" }}>
-            Selezionati: <span style={{ color: "var(--text)", fontWeight: 700 }}>{selectedIds.length}</span>
+            Selezionati: <span style={{ color: "var(--text)", fontWeight: 800 }}>{selectedIds.length}</span>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -301,8 +286,8 @@ export default function UfficioBancaliProntiPage() {
               onChange={(e) => setAssignTripDate(e.target.value)}
               className="rounded-2xl border px-3 py-2 text-xs shadow-sm focus:outline-none focus:ring-2"
               style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-              title="Data viaggio da assegnare ai selezionati"
             />
+
             <button
               onClick={assignTripToSelected}
               className="rounded-2xl border px-4 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
@@ -312,9 +297,9 @@ export default function UfficioBancaliProntiPage() {
             </button>
 
             <button
-              onClick={sendSelected}
-              className="rounded-2xl px-4 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
-              style={{ background: "var(--text)", color: "var(--bg)" }}
+              onClick={markSentSelected}
+              className="rounded-2xl border px-4 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
             >
               Invia
             </button>
@@ -330,84 +315,71 @@ export default function UfficioBancaliProntiPage() {
         </div>
       </header>
 
-      {loading && <div className="text-sm" style={{ color: "var(--muted)" }}>Caricamento…</div>}
-
       {!loading && grouped.length === 0 && (
-        <div
-          className="rounded-3xl border p-6 text-sm shadow-sm"
-          style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--muted)" }}
-        >
+        <div className="rounded-3xl border p-6 text-sm shadow-sm" style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--muted)" }}>
           Nessun bancale pronto.
         </div>
       )}
 
-      {!loading && grouped.map((g) => (
-        <section key={g.key} className="space-y-2">
-          <div className="text-sm font-semibold" style={{ color: "var(--text)" }}>
-            {g.key === "SENZA_VIAGGIO" ? "Senza viaggio" : `Viaggio: ${fmtDateLabel(g.key)}`}
-          </div>
+      {!loading &&
+        grouped.map((g) => (
+          <section key={g.key} className="space-y-2">
+            <div className="text-sm font-semibold" style={{ color: "var(--text)" }}>
+              {g.key === "SENZA_VIAGGIO" ? "Senza viaggio" : `Viaggio: ${fmtDateLabel(g.key)}`}
+            </div>
 
-          <div className="space-y-2">
-            {g.items.map((p) => (
-              <label
-                key={p.id}
-                className="flex items-start justify-between gap-4 rounded-3xl border p-5 shadow-sm"
-                style={{ background: "var(--card)", borderColor: "var(--border)" }}
-              >
-                <div className="flex items-start gap-3">
-                  <input
-                    type="checkbox"
-                    className="mt-1 h-5 w-5"
-                    checked={!!selected[p.id]}
-                    onChange={() => toggleOne(p.id)}
-                  />
-
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="truncate text-base font-semibold" style={{ color: "var(--text)" }}>
-                        {p.client}
-                      </div>
-
-                      <span
-                        className="rounded-full px-2 py-1 text-xs font-semibold"
-                        style={{
-                          background: p.shipping_type === "COURIER" ? "rgba(56,189,248,0.18)" : "rgba(148,163,184,0.18)",
-                          color: "var(--text)",
-                          border: "1px solid var(--border)",
-                        }}
-                      >
-                        {p.shipping_type === "COURIER" ? "Corriere" : "Camion"}
-                      </span>
-                    </div>
-
-                    <div className="mt-1 text-sm" style={{ color: "var(--muted)" }}>
-                      Bancale <span style={{ color: "var(--text)", fontWeight: 600 }}>{p.pallet_no}</span> ·
-                      Bobine <span style={{ color: "var(--text)", fontWeight: 600 }}>{p.bobbins_count}</span>
-                    </div>
-
-                    {p.shipping_type === "COURIER" && (
-                      <div className="mt-2 text-xs" style={{ color: "var(--muted)" }}>
-                        Misure: <span style={{ color: "var(--text)", fontWeight: 700 }}>{prettyDims(p.dimensions)}</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <span
-                  className="shrink-0 rounded-full border px-3 py-1 text-xs font-semibold"
-                  style={{
-                    background: "rgba(16,185,129,0.18)",
-                    color: "var(--text)",
-                    borderColor: "var(--border)",
-                  }}
+            <div className="space-y-2">
+              {g.items.map((p) => (
+                <label
+                  key={p.id}
+                  className="flex items-start justify-between gap-4 rounded-3xl border p-5 shadow-sm"
+                  style={{ background: "var(--card)", borderColor: "var(--border)" }}
                 >
-                  Pronto
-                </span>
-              </label>
-            ))}
-          </div>
-        </section>
-      ))}
+                  <div className="flex items-start gap-3">
+                    <input type="checkbox" className="mt-1 h-5 w-5" checked={!!selected[p.id]} onChange={() => toggleOne(p.id)} />
+
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="truncate text-base font-semibold" style={{ color: "var(--text)" }}>
+                          {p.client}
+                        </div>
+
+                        <span
+                          className="rounded-full px-2 py-1 text-xs font-semibold"
+                          style={{
+                            background: p.shipping_type === "COURIER" ? "rgba(56,189,248,0.18)" : "rgba(148,163,184,0.18)",
+                            color: "var(--text)",
+                            border: "1px solid var(--border)",
+                          }}
+                        >
+                          {p.shipping_type === "COURIER" ? "Corriere" : "Camion"}
+                        </span>
+                      </div>
+
+                      <div className="mt-1 text-sm" style={{ color: "var(--muted)" }}>
+                        Bancale <span style={{ color: "var(--text)", fontWeight: 700 }}>{p.pallet_no}</span> · Bobine{" "}
+                        <span style={{ color: "var(--text)", fontWeight: 700 }}>{p.bobbins_count}</span>
+                      </div>
+
+                      {p.shipping_type === "COURIER" && (
+                        <div className="mt-2 text-xs" style={{ color: "var(--muted)" }}>
+                          Misure: <span style={{ color: "var(--text)", fontWeight: 800 }}>{prettyDims(p.dimensions)}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <span
+                    className="shrink-0 rounded-full border px-3 py-1 text-xs font-semibold"
+                    style={{ background: "rgba(16,185,129,0.18)", color: "var(--text)", borderColor: "var(--border)" }}
+                  >
+                    Pronto
+                  </span>
+                </label>
+              ))}
+            </div>
+          </section>
+        ))}
     </main>
   );
 }
