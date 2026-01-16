@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
+import { extractTripDate, fmtDateLabel, getOrCreateTripId, prettyDims } from "@/lib/trips";
 
 type Pallet = {
   id: string;
@@ -13,48 +14,18 @@ type Pallet = {
   shipping_type: "COURIER";
   dimensions: string | null;
   trip_id: string | null;
+  trip: any; // trip:trip_id(trip_date) -> può essere object o array
   sent_at: string | null;
   created_at: string;
 };
-
-async function getOrCreateTripId(tripDate: string): Promise<string> {
-  const found = await supabase
-    .from("trips")
-    .select("id")
-    .eq("trip_date", tripDate)
-    .eq("status", "OPEN")
-    .limit(1);
-
-  if (found.error) throw found.error;
-  if (found.data && found.data.length > 0) return found.data[0].id as string;
-
-  const created = await supabase
-    .from("trips")
-    .insert({ trip_date: tripDate, status: "OPEN" })
-    .select("id")
-    .single();
-
-  if (created.error) throw created.error;
-  return created.data.id as string;
-}
 
 function formatDims(l: string, p: string, h: string) {
   const L = l.trim();
   const P = p.trim();
   const H = h.trim();
   if (!L || !P || !H) return null;
+  // formato salvato: 110x130x150
   return `${L}x${P}x${H}`;
-}
-
-function prettyDims(s: string | null) {
-  if (!s) return "—";
-  return s.split("x").map(t => t.trim()).join(" × ");
-}
-
-function clsPill(status: "IN_PROGRESS" | "READY") {
-  return status === "READY"
-    ? "bg-emerald-500/15 border-emerald-500/30"
-    : "bg-amber-500/15 border-amber-500/30";
 }
 
 export default function ProduzioneCorrierePage() {
@@ -67,9 +38,9 @@ export default function ProduzioneCorrierePage() {
   const [palletNo, setPalletNo] = useState("");
   const [bobbins, setBobbins] = useState<number>(0);
   const [status, setStatus] = useState<"IN_PROGRESS" | "READY">("IN_PROGRESS");
-  const [tripDate, setTripDate] = useState<string>(""); // YYYY-MM-DD (opzionale)
+  const [tripDate, setTripDate] = useState<string>("");
 
-  // misure: L x P x H
+  // misure (3 campi separati)
   const [dimL, setDimL] = useState("");
   const [dimP, setDimP] = useState("");
   const [dimH, setDimH] = useState("");
@@ -79,7 +50,9 @@ export default function ProduzioneCorrierePage() {
 
     const res = await supabase
       .from("pallets")
-      .select("id, client, pallet_no, bobbins_count, status, shipping_type, dimensions, trip_id, sent_at, created_at")
+      .select(
+        "id, client, pallet_no, bobbins_count, status, shipping_type, dimensions, trip_id, sent_at, created_at, trip:trip_id(trip_date)"
+      )
       .eq("shipping_type", "COURIER")
       .is("sent_at", null)
       .order("created_at", { ascending: false });
@@ -88,7 +61,7 @@ export default function ProduzioneCorrierePage() {
       console.error(res.error);
       setItems([]);
     } else {
-      setItems((res.data ?? []) as Pallet[]);
+      setItems((res.data ?? []) as unknown as Pallet[]);
     }
 
     setLoading(false);
@@ -96,40 +69,36 @@ export default function ProduzioneCorrierePage() {
 
   useEffect(() => {
     load();
-
     const onFocus = () => load();
-    const onVis = () => { if (document.visibilityState === "visible") load(); };
-
+    const onVis = () => {
+      if (document.visibilityState === "visible") load();
+    };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVis);
-
     return () => {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVis);
     };
   }, []);
 
-  async function addPallet(e: React.FormEvent) {
-    e.preventDefault();
-
+  async function add() {
     const c = client.trim();
     const p = palletNo.trim();
+
     if (!c || !p) {
-      alert("Cliente e Numero bancale sono obbligatori.");
+      alert("Inserisci Cliente e N. bancale.");
       return;
     }
 
     const dims = formatDims(dimL, dimP, dimH);
     if (!dims) {
-      alert("Per il corriere le misure sono obbligatorie (L × P × H).");
+      alert("Inserisci tutte le misure (L, P, H).");
       return;
     }
 
     try {
       let trip_id: string | null = null;
-      if (tripDate.trim()) {
-        trip_id = await getOrCreateTripId(tripDate.trim());
-      }
+      if (tripDate) trip_id = await getOrCreateTripId(tripDate);
 
       const { error } = await supabase.from("pallets").insert({
         client: c,
@@ -143,24 +112,28 @@ export default function ProduzioneCorrierePage() {
 
       if (error) throw error;
 
+      setClient("");
       setPalletNo("");
       setBobbins(0);
       setStatus("IN_PROGRESS");
-      // tripDate resta per inserimenti multipli
-      setDimL(""); setDimP(""); setDimH("");
+      setTripDate("");
+      setDimL("");
+      setDimP("");
+      setDimH("");
 
       await load();
-    } catch (err) {
-      console.error(err);
+    } catch (e) {
+      console.error(e);
       alert("Errore salvataggio (vedi console F12).");
     }
   }
 
-  async function setStatusById(id: string, next: "IN_PROGRESS" | "READY") {
+  async function toggleStatus(id: string, current: Pallet["status"]) {
+    const next = current === "READY" ? "IN_PROGRESS" : "READY";
     const { error } = await supabase.from("pallets").update({ status: next }).eq("id", id);
     if (error) {
       console.error(error);
-      alert("Errore aggiornamento stato (vedi console F12).");
+      alert("Errore aggiornamento stato (F12).");
       return;
     }
     await load();
@@ -169,20 +142,22 @@ export default function ProduzioneCorrierePage() {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return items;
-    return items.filter((x) =>
-      x.client.toLowerCase().includes(q) ||
-      x.pallet_no.toLowerCase().includes(q) ||
-      (x.dimensions ?? "").toLowerCase().includes(q)
-    );
+
+    return items.filter((p) => {
+      const td = extractTripDate(p.trip) ?? "";
+      return (
+        p.client.toLowerCase().includes(q) ||
+        p.pallet_no.toLowerCase().includes(q) ||
+        td.toLowerCase().includes(q) ||
+        (p.dimensions ?? "").toLowerCase().includes(q)
+      );
+    });
   }, [items, query]);
 
-  const byClient = useMemo(() => {
+  // ordinamento per cliente (come produzione camion)
+  const ordered = useMemo(() => {
     const arr = [...filtered];
-    arr.sort((a, b) => {
-      const c = a.client.localeCompare(b.client);
-      if (c !== 0) return c;
-      return a.pallet_no.localeCompare(b.pallet_no);
-    });
+    arr.sort((a, b) => a.client.localeCompare(b.client));
     return arr;
   }, [filtered]);
 
@@ -195,7 +170,7 @@ export default function ProduzioneCorrierePage() {
               Produzione · Corriere
             </h1>
             <p className="text-sm" style={{ color: "var(--muted)" }}>
-              Inserimento bancali corriere (misure obbligatorie). Ordinamento per cliente.
+              Misure obbligatorie. Data viaggio salva davvero (trip_id) e si vede ovunque.
             </p>
           </div>
 
@@ -208,209 +183,165 @@ export default function ProduzioneCorrierePage() {
           </button>
         </div>
 
-        <div
-          className="rounded-3xl border p-5 shadow-sm"
-          style={{ background: "var(--card)", borderColor: "var(--border)" }}
-        >
-          <form onSubmit={addPallet} className="grid gap-3 md:grid-cols-2">
-            <div className="space-y-1">
-              <div className="text-xs font-semibold" style={{ color: "var(--muted)" }}>Cliente</div>
-              <input
-                value={client}
-                onChange={(e) => setClient(e.target.value)}
-                className="w-full rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
-                style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-                placeholder="Es. Porchietto"
-              />
-            </div>
+        <div className="grid gap-3 md:grid-cols-6">
+          <input
+            className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2 md:col-span-2"
+            style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+            placeholder="Cliente"
+            value={client}
+            onChange={(e) => setClient(e.target.value)}
+          />
+          <input
+            className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+            style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+            placeholder="N. bancale"
+            value={palletNo}
+            onChange={(e) => setPalletNo(e.target.value)}
+          />
+          <input
+            type="number"
+            className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+            style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+            placeholder="N. bobine"
+            value={bobbins}
+            onChange={(e) => setBobbins(parseInt(e.target.value || "0", 10))}
+            min={0}
+          />
+          <input
+            type="date"
+            className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+            style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+            value={tripDate}
+            onChange={(e) => setTripDate(e.target.value)}
+            title="Data viaggio (opzionale)"
+          />
+          <select
+            value={status}
+            onChange={(e) => setStatus(e.target.value as any)}
+            className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+            style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+          >
+            <option value="IN_PROGRESS">In completamento</option>
+            <option value="READY">Pronto</option>
+          </select>
 
-            <div className="space-y-1">
-              <div className="text-xs font-semibold" style={{ color: "var(--muted)" }}>Numero bancale</div>
-              <input
-                value={palletNo}
-                onChange={(e) => setPalletNo(e.target.value)}
-                className="w-full rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
-                style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-                placeholder="Es. C-001"
-              />
-            </div>
+          <div className="md:col-span-6 grid grid-cols-3 gap-3">
+            <input
+              className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+              placeholder="L (es 110)"
+              value={dimL}
+              onChange={(e) => setDimL(e.target.value)}
+            />
+            <input
+              className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+              placeholder="P (es 130)"
+              value={dimP}
+              onChange={(e) => setDimP(e.target.value)}
+            />
+            <input
+              className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+              placeholder="H (es 150)"
+              value={dimH}
+              onChange={(e) => setDimH(e.target.value)}
+            />
+          </div>
 
-            <div className="space-y-1">
-              <div className="text-xs font-semibold" style={{ color: "var(--muted)" }}>Numero bobine</div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setBobbins((v) => Math.max(0, (v ?? 0) - 1))}
-                  className="h-11 w-11 rounded-2xl border text-lg font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
-                  style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-                >
-                  −
-                </button>
-                <input
-                  value={bobbins}
-                  onChange={(e) => setBobbins(parseInt(e.target.value || "0", 10))}
-                  inputMode="numeric"
-                  className="w-full rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
-                  style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-                />
-                <button
-                  type="button"
-                  onClick={() => setBobbins((v) => (v ?? 0) + 1)}
-                  className="h-11 w-11 rounded-2xl border text-lg font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
-                  style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-                >
-                  +
-                </button>
-              </div>
-            </div>
-
-            <div className="space-y-1">
-              <div className="text-xs font-semibold" style={{ color: "var(--muted)" }}>Stato</div>
-              <select
-                value={status}
-                onChange={(e) => setStatus(e.target.value as any)}
-                className="w-full rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
-                style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-              >
-                <option value="IN_PROGRESS">In completamento</option>
-                <option value="READY">Pronto</option>
-              </select>
-            </div>
-
-            <div className="md:col-span-2 space-y-1">
-              <div className="text-xs font-semibold" style={{ color: "var(--muted)" }}>
-                Misure bancale (obbligatorie) — L × P × H
-              </div>
-              <div className="grid gap-2 md:grid-cols-3">
-                <input
-                  value={dimL}
-                  onChange={(e) => setDimL(e.target.value)}
-                  className="w-full rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
-                  style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-                  placeholder="L (es. 110)"
-                />
-                <input
-                  value={dimP}
-                  onChange={(e) => setDimP(e.target.value)}
-                  className="w-full rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
-                  style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-                  placeholder="P (es. 130)"
-                />
-                <input
-                  value={dimH}
-                  onChange={(e) => setDimH(e.target.value)}
-                  className="w-full rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
-                  style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-                  placeholder="H (es. 150)"
-                />
-              </div>
-              <div className="text-xs" style={{ color: "var(--muted)" }}>
-                Anteprima: <span style={{ color: "var(--text)", fontWeight: 700 }}>{prettyDims(formatDims(dimL, dimP, dimH))}</span>
-              </div>
-            </div>
-
-            <div className="md:col-span-2 space-y-1">
-              <div className="text-xs font-semibold" style={{ color: "var(--muted)" }}>
-                Data viaggio (opzionale) — crea/aggancia il viaggio OPEN
-              </div>
-              <input
-                type="date"
-                value={tripDate}
-                onChange={(e) => setTripDate(e.target.value)}
-                className="w-full rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
-                style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-              />
-            </div>
-
-            <div className="md:col-span-2 flex justify-end">
-              <button
-                type="submit"
-                className="rounded-2xl px-5 py-3 text-sm font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
-                style={{ background: "var(--text)", color: "var(--bg)" }}
-              >
-                Aggiungi bancale
-              </button>
-            </div>
-          </form>
+          <div className="md:col-span-6 flex justify-end">
+            <button
+              onClick={add}
+              className="rounded-2xl px-5 py-3 text-sm font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
+              style={{ background: "var(--text)", color: "var(--bg)" }}
+            >
+              Aggiungi
+            </button>
+          </div>
         </div>
 
         <input
           className="w-full rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
           style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-          placeholder="Cerca per cliente, bancale o misure…"
+          placeholder="Cerca cliente / bancale / data / misure…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
       </header>
 
-      {loading && <div className="text-sm" style={{ color: "var(--muted)" }}>Caricamento…</div>}
+      {loading && (
+        <div className="text-sm" style={{ color: "var(--muted)" }}>
+          Caricamento…
+        </div>
+      )}
 
-      {!loading && byClient.length === 0 && (
-        <div className="rounded-3xl border p-6 text-sm shadow-sm" style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--muted)" }}>
+      {!loading && ordered.length === 0 && (
+        <div
+          className="rounded-3xl border p-6 text-sm shadow-sm"
+          style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--muted)" }}
+        >
           Nessun bancale corriere.
         </div>
       )}
 
       {!loading && (
         <div className="space-y-2">
-          {byClient.map((p) => (
-            <div
-              key={p.id}
-              className="rounded-3xl border p-5 shadow-sm"
-              style={{ background: "var(--card)", borderColor: "var(--border)" }}
-            >
-              <div className="flex items-start justify-between gap-4">
+          {ordered.map((p) => {
+            const td = extractTripDate(p.trip);
+            return (
+              <div
+                key={p.id}
+                className="rounded-3xl border p-5 shadow-sm flex items-start justify-between gap-4"
+                style={{ background: "var(--card)", borderColor: "var(--border)" }}
+              >
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <div className="text-base font-semibold truncate" style={{ color: "var(--text)" }}>
                       {p.client}
                     </div>
-
-                    <span
-                      className={"shrink-0 rounded-full border px-3 py-1 text-xs font-semibold " + clsPill(p.status)}
+                    <Link
+                      href={`/produzione/bancali/${p.id}`}
+                      className="text-xs font-semibold underline underline-offset-4"
                       style={{ color: "var(--text)" }}
                     >
-                      {p.status === "READY" ? "Pronto" : "In completamento"}
-                    </span>
+                      Dettaglio
+                    </Link>
                   </div>
 
                   <div className="mt-1 text-sm" style={{ color: "var(--muted)" }}>
-                    Bancale <span style={{ color: "var(--text)", fontWeight: 600 }}>{p.pallet_no}</span> ·
-                    Bobine <span style={{ color: "var(--text)", fontWeight: 600 }}>{p.bobbins_count}</span>
+                    Bancale <span style={{ color: "var(--text)", fontWeight: 700 }}>{p.pallet_no}</span> · Bobine{" "}
+                    <span style={{ color: "var(--text)", fontWeight: 700 }}>{p.bobbins_count}</span>
                   </div>
 
                   <div className="mt-2 text-xs" style={{ color: "var(--muted)" }}>
-                    Misure: <span style={{ color: "var(--text)", fontWeight: 700 }}>{prettyDims(p.dimensions)}</span>
+                    Misure:{" "}
+                    <span style={{ color: "var(--text)", fontWeight: 800 }}>
+                      {prettyDims(p.dimensions)}
+                    </span>
+                  </div>
+
+                  <div className="mt-1 text-xs" style={{ color: "var(--muted)" }}>
+                    Viaggio:{" "}
+                    <span style={{ color: "var(--text)", fontWeight: 800 }}>
+                      {fmtDateLabel(td)}
+                    </span>
                   </div>
                 </div>
 
-                <Link
-                  href={`/produzione/bancali/${p.id}`}
-                  className="rounded-2xl border px-3 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
-                  style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-                >
-                  Dettagli →
-                </Link>
-              </div>
-
-              <div className="mt-4 flex flex-wrap gap-2">
                 <button
-                  onClick={() => setStatusById(p.id, "IN_PROGRESS")}
-                  className="rounded-2xl border px-3 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
-                  style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                  onClick={() => toggleStatus(p.id, p.status)}
+                  className="shrink-0 rounded-full border px-3 py-1 text-xs font-semibold"
+                  style={{
+                    background: p.status === "READY" ? "rgba(16,185,129,0.18)" : "rgba(234,179,8,0.18)",
+                    color: "var(--text)",
+                    borderColor: "var(--border)",
+                  }}
                 >
-                  In completamento
-                </button>
-                <button
-                  onClick={() => setStatusById(p.id, "READY")}
-                  className="rounded-2xl border px-3 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
-                  style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-                >
-                  Pronto
+                  {p.status === "READY" ? "Pronto" : "In completamento"}
                 </button>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </main>
