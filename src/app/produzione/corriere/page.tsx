@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
-import { extractTripDate, fmtDateLabel, getOrCreateTripId, prettyDims } from "@/lib/trips";
+import { fmtDateLabel, getOrCreateTripId, prettyDims } from "@/lib/trips";
 
 type Pallet = {
   id: string;
@@ -14,45 +14,76 @@ type Pallet = {
   shipping_type: "COURIER";
   dimensions: string | null;
   trip_id: string | null;
-  trip: any; // trip:trip_id(trip_date) -> può essere object o array
+  trip_date: string | null;
   sent_at: string | null;
   created_at: string;
 };
 
-function formatDims(l: string, p: string, h: string) {
+type Editing = {
+  id: string;
+  client: string;
+  pallet_no: string;
+  bobbins_count: string;
+  status: "IN_PROGRESS" | "READY";
+  trip_date: string; // YYYY-MM-DD oppure ""
+  l: string; // cm
+  p: string; // cm
+  h: string; // cm
+};
+
+function parseDimsToParts(dim: string | null): { l: string; p: string; h: string } {
+  if (!dim) return { l: "", p: "", h: "" };
+  // accetta "110x130x150" o "110 x 130 x 150" o con cm
+  const cleaned = dim.toLowerCase().replace("cm", "").trim();
+  const parts = cleaned.split("x").map((s) => s.trim()).filter(Boolean);
+  if (parts.length !== 3) return { l: "", p: "", h: "" };
+  return { l: parts[0], p: parts[1], h: parts[2] };
+}
+
+function buildDims(l: string, p: string, h: string): string | null {
   const L = l.trim();
   const P = p.trim();
   const H = h.trim();
-  if (!L || !P || !H) return null;
-  // formato salvato: 110x130x150
-  return `${L}x${P}x${H}`;
+  if (!L && !P && !H) return null;
+  if (!L || !P || !H) return null; // o tutte e 3 o niente
+  return `${L} x ${P} x ${H} cm`;
 }
 
 export default function ProduzioneCorrierePage() {
   const [loading, setLoading] = useState(true);
   const [items, setItems] = useState<Pallet[]>([]);
-  const [query, setQuery] = useState("");
 
-  // form
   const [client, setClient] = useState("");
   const [palletNo, setPalletNo] = useState("");
-  const [bobbins, setBobbins] = useState<number>(0);
+  const [bobbinsCount, setBobbinsCount] = useState("0");
   const [status, setStatus] = useState<"IN_PROGRESS" | "READY">("IN_PROGRESS");
   const [tripDate, setTripDate] = useState<string>("");
 
-  // misure (3 campi separati)
-  const [dimL, setDimL] = useState("");
-  const [dimP, setDimP] = useState("");
-  const [dimH, setDimH] = useState("");
+  const [l, setL] = useState("");
+  const [p, setP] = useState("");
+  const [h, setH] = useState("");
+
+  const [query, setQuery] = useState("");
+  const [editing, setEditing] = useState<Editing | null>(null);
 
   async function load() {
     setLoading(true);
 
     const res = await supabase
       .from("pallets")
-      .select(
-        "id, client, pallet_no, bobbins_count, status, shipping_type, dimensions, trip_id, sent_at, created_at, trip:trip_id(trip_date)"
-      )
+      .select(`
+        id,
+        client,
+        pallet_no,
+        bobbins_count,
+        status,
+        shipping_type,
+        dimensions,
+        trip_id,
+        sent_at,
+        created_at,
+        trips:trips ( trip_date )
+      `)
       .eq("shipping_type", "COURIER")
       .is("sent_at", null)
       .order("created_at", { ascending: false });
@@ -60,106 +91,170 @@ export default function ProduzioneCorrierePage() {
     if (res.error) {
       console.error(res.error);
       setItems([]);
-    } else {
-      setItems((res.data ?? []) as unknown as Pallet[]);
+      setLoading(false);
+      return;
     }
 
+    const raw = (res.data ?? []) as any[];
+    const mapped: Pallet[] = raw.map((r) => ({
+      id: r.id,
+      client: r.client,
+      pallet_no: r.pallet_no,
+      bobbins_count: r.bobbins_count ?? 0,
+      status: r.status,
+      shipping_type: "COURIER",
+      dimensions: r.dimensions ?? null,
+      trip_id: r.trip_id ?? null,
+      trip_date: r.trips?.trip_date ?? null,
+      sent_at: r.sent_at ?? null,
+      created_at: r.created_at,
+    }));
+
+    setItems(mapped);
     setLoading(false);
   }
 
   useEffect(() => {
     load();
     const onFocus = () => load();
-    const onVis = () => {
-      if (document.visibilityState === "visible") load();
-    };
     window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onVis);
-    };
+    return () => window.removeEventListener("focus", onFocus);
   }, []);
-
-  async function add() {
-    const c = client.trim();
-    const p = palletNo.trim();
-
-    if (!c || !p) {
-      alert("Inserisci Cliente e N. bancale.");
-      return;
-    }
-
-    const dims = formatDims(dimL, dimP, dimH);
-    if (!dims) {
-      alert("Inserisci tutte le misure (L, P, H).");
-      return;
-    }
-
-    try {
-      let trip_id: string | null = null;
-      if (tripDate) trip_id = await getOrCreateTripId(tripDate);
-
-      const { error } = await supabase.from("pallets").insert({
-        client: c,
-        pallet_no: p,
-        bobbins_count: Number.isFinite(bobbins) ? bobbins : 0,
-        status,
-        shipping_type: "COURIER",
-        dimensions: dims,
-        trip_id,
-      });
-
-      if (error) throw error;
-
-      setClient("");
-      setPalletNo("");
-      setBobbins(0);
-      setStatus("IN_PROGRESS");
-      setTripDate("");
-      setDimL("");
-      setDimP("");
-      setDimH("");
-
-      await load();
-    } catch (e) {
-      console.error(e);
-      alert("Errore salvataggio (vedi console F12).");
-    }
-  }
-
-  async function toggleStatus(id: string, current: Pallet["status"]) {
-    const next = current === "READY" ? "IN_PROGRESS" : "READY";
-    const { error } = await supabase.from("pallets").update({ status: next }).eq("id", id);
-    if (error) {
-      console.error(error);
-      alert("Errore aggiornamento stato (F12).");
-      return;
-    }
-    await load();
-  }
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return items;
-
-    return items.filter((p) => {
-      const td = extractTripDate(p.trip) ?? "";
+    return items.filter((x) => {
+      const td = x.trip_date ?? "";
       return (
-        p.client.toLowerCase().includes(q) ||
-        p.pallet_no.toLowerCase().includes(q) ||
+        x.client.toLowerCase().includes(q) ||
+        x.pallet_no.toLowerCase().includes(q) ||
         td.toLowerCase().includes(q) ||
-        (p.dimensions ?? "").toLowerCase().includes(q)
+        (x.dimensions ?? "").toLowerCase().includes(q)
       );
     });
   }, [items, query]);
 
-  // ordinamento per cliente (come produzione camion)
   const ordered = useMemo(() => {
     const arr = [...filtered];
     arr.sort((a, b) => a.client.localeCompare(b.client));
     return arr;
   }, [filtered]);
+
+  async function createPallet() {
+    const c = client.trim();
+    const pn = palletNo.trim();
+    const bc = parseInt(bobbinsCount, 10);
+    const dims = buildDims(l, p, h);
+
+    if (!c) return alert("Inserisci il cliente.");
+    if (!pn) return alert("Inserisci il numero bancale.");
+    if (!Number.isFinite(bc) || bc < 0) return alert("Numero bobine non valido.");
+    if (dims === null && (l.trim() || p.trim() || h.trim())) return alert("Misure: compila L, P, H (tutte e 3).");
+
+    let trip_id: string | null = null;
+    if (tripDate) trip_id = await getOrCreateTripId(tripDate);
+
+    const { error } = await supabase.from("pallets").insert({
+      client: c,
+      pallet_no: pn,
+      bobbins_count: bc,
+      status,
+      shipping_type: "COURIER",
+      dimensions: dims,
+      trip_id,
+    });
+
+    if (error) {
+      console.error(error);
+      alert("Errore inserimento (F12).");
+      return;
+    }
+
+    setClient("");
+    setPalletNo("");
+    setBobbinsCount("0");
+    setStatus("IN_PROGRESS");
+    setL(""); setP(""); setH("");
+
+    await load();
+  }
+
+  function startEdit(pal: Pallet) {
+    const parts = parseDimsToParts(pal.dimensions);
+    setEditing({
+      id: pal.id,
+      client: pal.client,
+      pallet_no: pal.pallet_no,
+      bobbins_count: String(pal.bobbins_count ?? 0),
+      status: pal.status,
+      trip_date: pal.trip_date ?? "",
+      l: parts.l,
+      p: parts.p,
+      h: parts.h,
+    });
+  }
+
+  function cancelEdit() {
+    setEditing(null);
+  }
+
+  async function saveEdit() {
+    if (!editing) return;
+
+    const c = editing.client.trim();
+    const pn = editing.pallet_no.trim();
+    const bc = parseInt(editing.bobbins_count, 10);
+    const dims = buildDims(editing.l, editing.p, editing.h);
+
+    if (!c) return alert("Cliente obbligatorio.");
+    if (!pn) return alert("Numero bancale obbligatorio.");
+    if (!Number.isFinite(bc) || bc < 0) return alert("Numero bobine non valido.");
+    if (dims === null && (editing.l.trim() || editing.p.trim() || editing.h.trim())) return alert("Misure: compila L, P, H (tutte e 3).");
+
+    let trip_id: string | null = null;
+    if (editing.trip_date) trip_id = await getOrCreateTripId(editing.trip_date);
+
+    const { error } = await supabase
+      .from("pallets")
+      .update({
+        client: c,
+        pallet_no: pn,
+        bobbins_count: bc,
+        status: editing.status,
+        trip_id,
+        dimensions: dims,
+      })
+      .eq("id", editing.id);
+
+    if (error) {
+      console.error(error);
+      alert("Errore salvataggio (F12).");
+      return;
+    }
+
+    setEditing(null);
+    await load();
+  }
+
+  async function deleteOne(id: string) {
+    if (!confirm("Eliminare definitivamente questo bancale?")) return;
+
+    const { error } = await supabase.from("pallets").delete().eq("id", id);
+    if (error) {
+      console.error(error);
+      alert("Errore eliminazione (F12).");
+      return;
+    }
+
+    if (editing?.id === id) setEditing(null);
+    await load();
+  }
+
+  const pill = (s: "IN_PROGRESS" | "READY") => {
+    if (s === "READY") return { text: "Pronto", bg: "rgba(16,185,129,0.18)" };
+    return { text: "In completamento", bg: "rgba(250,204,21,0.22)" };
+  };
 
   return (
     <main className="space-y-6">
@@ -170,7 +265,7 @@ export default function ProduzioneCorrierePage() {
               Produzione · Corriere
             </h1>
             <p className="text-sm" style={{ color: "var(--muted)" }}>
-              Misure obbligatorie. Data viaggio salva davvero (trip_id) e si vede ovunque.
+              Inserisci bancali corriere con misure. Modifica ed elimina sono disponibili.
             </p>
           </div>
 
@@ -183,80 +278,91 @@ export default function ProduzioneCorrierePage() {
           </button>
         </div>
 
-        <div className="grid gap-3 md:grid-cols-6">
-          <input
-            className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2 md:col-span-2"
-            style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-            placeholder="Cliente"
-            value={client}
-            onChange={(e) => setClient(e.target.value)}
-          />
-          <input
-            className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
-            style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-            placeholder="N. bancale"
-            value={palletNo}
-            onChange={(e) => setPalletNo(e.target.value)}
-          />
-          <input
-            type="number"
-            className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
-            style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-            placeholder="N. bobine"
-            value={bobbins}
-            onChange={(e) => setBobbins(parseInt(e.target.value || "0", 10))}
-            min={0}
-          />
-          <input
-            type="date"
-            className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
-            style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-            value={tripDate}
-            onChange={(e) => setTripDate(e.target.value)}
-            title="Data viaggio (opzionale)"
-          />
-          <select
-            value={status}
-            onChange={(e) => setStatus(e.target.value as any)}
-            className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
-            style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-          >
-            <option value="IN_PROGRESS">In completamento</option>
-            <option value="READY">Pronto</option>
-          </select>
+        <div className="grid gap-3 rounded-3xl border p-4 shadow-sm"
+             style={{ background: "var(--card)", borderColor: "var(--border)" }}>
+          <div className="grid gap-3 md:grid-cols-2">
+            <input
+              className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+              placeholder="Cliente"
+              value={client}
+              onChange={(e) => setClient(e.target.value)}
+            />
 
-          <div className="md:col-span-6 grid grid-cols-3 gap-3">
             <input
               className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
               style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-              placeholder="L (es 110)"
-              value={dimL}
-              onChange={(e) => setDimL(e.target.value)}
-            />
-            <input
-              className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
-              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-              placeholder="P (es 130)"
-              value={dimP}
-              onChange={(e) => setDimP(e.target.value)}
-            />
-            <input
-              className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
-              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-              placeholder="H (es 150)"
-              value={dimH}
-              onChange={(e) => setDimH(e.target.value)}
+              placeholder="N. bancale"
+              value={palletNo}
+              onChange={(e) => setPalletNo(e.target.value)}
             />
           </div>
 
-          <div className="md:col-span-6 flex justify-end">
-            <button
-              onClick={add}
-              className="rounded-2xl px-5 py-3 text-sm font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
-              style={{ background: "var(--text)", color: "var(--bg)" }}
+          <div className="grid gap-3 md:grid-cols-3">
+            <input
+              type="number"
+              min="0"
+              className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+              placeholder="N. bobine"
+              value={bobbinsCount}
+              onChange={(e) => setBobbinsCount(e.target.value)}
+            />
+
+            <select
+              className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+              value={status}
+              onChange={(e) => setStatus(e.target.value as any)}
             >
-              Aggiungi
-            </button>
+              <option value="IN_PROGRESS">In completamento</option>
+              <option value="READY">Pronto</option>
+            </select>
+
+            <input
+              type="date"
+              className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+              value={tripDate}
+              onChange={(e) => setTripDate(e.target.value)}
+              title="Data viaggio (opzionale)"
+            />
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-3">
+            <input
+              className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+              placeholder="L (cm)"
+              value={l}
+              onChange={(e) => setL(e.target.value)}
+            />
+            <input
+              className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+              placeholder="P (cm)"
+              value={p}
+              onChange={(e) => setP(e.target.value)}
+            />
+            <input
+              className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+              placeholder="H (cm)"
+              value={h}
+              onChange={(e) => setH(e.target.value)}
+            />
+          </div>
+
+          <button
+            onClick={createPallet}
+            className="rounded-2xl border px-4 py-3 text-sm font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
+            style={{ background: "var(--text)", borderColor: "var(--text)", color: "var(--bg)" }}
+          >
+            Aggiungi bancale corriere
+          </button>
+
+          <div className="text-xs" style={{ color: "var(--muted)" }}>
+            Per Filippo: <span style={{ color: "var(--text)", fontWeight: 800 }}>qui non facciamo arte astratta: numeri chiari, bancali chiari.</span>
           </div>
         </div>
 
@@ -269,76 +375,179 @@ export default function ProduzioneCorrierePage() {
         />
       </header>
 
-      {loading && (
-        <div className="text-sm" style={{ color: "var(--muted)" }}>
-          Caricamento…
-        </div>
-      )}
+      {loading && <div className="text-sm" style={{ color: "var(--muted)" }}>Caricamento…</div>}
 
       {!loading && ordered.length === 0 && (
-        <div
-          className="rounded-3xl border p-6 text-sm shadow-sm"
-          style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--muted)" }}
-        >
+        <div className="rounded-3xl border p-6 text-sm shadow-sm"
+             style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--muted)" }}>
           Nessun bancale corriere.
         </div>
       )}
 
-      {!loading && (
+      {!loading && ordered.length > 0 && (
         <div className="space-y-2">
-          {ordered.map((p) => {
-            const td = extractTripDate(p.trip);
+          {ordered.map((pal) => {
+            const st = pill(pal.status);
+            const isEdit = editing?.id === pal.id;
+
             return (
-              <div
-                key={p.id}
-                className="rounded-3xl border p-5 shadow-sm flex items-start justify-between gap-4"
-                style={{ background: "var(--card)", borderColor: "var(--border)" }}
-              >
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="text-base font-semibold truncate" style={{ color: "var(--text)" }}>
-                      {p.client}
+              <div key={pal.id} className="rounded-3xl border p-5 shadow-sm"
+                   style={{ background: "var(--card)", borderColor: "var(--border)" }}>
+                {!isEdit ? (
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="truncate text-base font-semibold" style={{ color: "var(--text)" }}>
+                          {pal.client}
+                        </div>
+
+                        <span className="rounded-full border px-3 py-1 text-xs font-semibold"
+                              style={{ background: st.bg, borderColor: "var(--border)", color: "var(--text)" }}>
+                          {st.text}
+                        </span>
+                      </div>
+
+                      <div className="mt-1 text-sm" style={{ color: "var(--muted)" }}>
+                        Bancale <span style={{ color: "var(--text)", fontWeight: 800 }}>{pal.pallet_no}</span> · Bobine{" "}
+                        <span style={{ color: "var(--text)", fontWeight: 800 }}>{pal.bobbins_count}</span>
+                        {pal.trip_date && (
+                          <>
+                            {" "}· Viaggio <span style={{ color: "var(--text)", fontWeight: 800 }}>{fmtDateLabel(pal.trip_date)}</span>
+                          </>
+                        )}
+                      </div>
+
+                      <div className="mt-2 text-xs" style={{ color: "var(--muted)" }}>
+                        Misure: <span style={{ color: "var(--text)", fontWeight: 900 }}>{prettyDims(pal.dimensions)}</span>
+                      </div>
+
+                      <div className="mt-2">
+                        <Link
+                          href={`/produzione/bancali/${pal.id}`}
+                          className="text-xs font-semibold underline underline-offset-4"
+                          style={{ color: "var(--text)" }}
+                        >
+                          Apri scheda bancale
+                        </Link>
+                      </div>
                     </div>
-                    <Link
-                      href={`/produzione/bancali/${p.id}`}
-                      className="text-xs font-semibold underline underline-offset-4"
-                      style={{ color: "var(--text)" }}
-                    >
-                      Dettaglio
-                    </Link>
-                  </div>
 
-                  <div className="mt-1 text-sm" style={{ color: "var(--muted)" }}>
-                    Bancale <span style={{ color: "var(--text)", fontWeight: 700 }}>{p.pallet_no}</span> · Bobine{" "}
-                    <span style={{ color: "var(--text)", fontWeight: 700 }}>{p.bobbins_count}</span>
-                  </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <button
+                        onClick={() => startEdit(pal)}
+                        className="rounded-2xl border px-3 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
+                        style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                      >
+                        Modifica
+                      </button>
 
-                  <div className="mt-2 text-xs" style={{ color: "var(--muted)" }}>
-                    Misure:{" "}
-                    <span style={{ color: "var(--text)", fontWeight: 800 }}>
-                      {prettyDims(p.dimensions)}
-                    </span>
+                      <button
+                        onClick={() => deleteOne(pal.id)}
+                        className="rounded-2xl border px-3 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
+                        style={{ background: "var(--card)", borderColor: "#ef4444", color: "#ef4444" }}
+                      >
+                        Elimina
+                      </button>
+                    </div>
                   </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="text-sm font-semibold" style={{ color: "var(--text)" }}>Modifica bancale corriere</div>
 
-                  <div className="mt-1 text-xs" style={{ color: "var(--muted)" }}>
-                    Viaggio:{" "}
-                    <span style={{ color: "var(--text)", fontWeight: 800 }}>
-                      {fmtDateLabel(td)}
-                    </span>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <input
+                        className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+                        style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                        value={editing.client}
+                        onChange={(e) => setEditing((s) => s ? ({ ...s, client: e.target.value }) : s)}
+                        placeholder="Cliente"
+                      />
+                      <input
+                        className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+                        style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                        value={editing.pallet_no}
+                        onChange={(e) => setEditing((s) => s ? ({ ...s, pallet_no: e.target.value }) : s)}
+                        placeholder="N. bancale"
+                      />
+                    </div>
+
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <input
+                        type="number"
+                        min="0"
+                        className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+                        style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                        value={editing.bobbins_count}
+                        onChange={(e) => setEditing((s) => s ? ({ ...s, bobbins_count: e.target.value }) : s)}
+                        placeholder="N. bobine"
+                      />
+
+                      <select
+                        className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+                        style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                        value={editing.status}
+                        onChange={(e) => setEditing((s) => s ? ({ ...s, status: e.target.value as any }) : s)}
+                      >
+                        <option value="IN_PROGRESS">In completamento</option>
+                        <option value="READY">Pronto</option>
+                      </select>
+
+                      <input
+                        type="date"
+                        className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+                        style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                        value={editing.trip_date}
+                        onChange={(e) => setEditing((s) => s ? ({ ...s, trip_date: e.target.value }) : s)}
+                        title="Data viaggio (opzionale)"
+                      />
+                    </div>
+
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <input
+                        className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+                        style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                        value={editing.l}
+                        onChange={(e) => setEditing((s) => s ? ({ ...s, l: e.target.value }) : s)}
+                        placeholder="L (cm)"
+                      />
+                      <input
+                        className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+                        style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                        value={editing.p}
+                        onChange={(e) => setEditing((s) => s ? ({ ...s, p: e.target.value }) : s)}
+                        placeholder="P (cm)"
+                      />
+                      <input
+                        className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
+                        style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                        value={editing.h}
+                        onChange={(e) => setEditing((s) => s ? ({ ...s, h: e.target.value }) : s)}
+                        placeholder="H (cm)"
+                      />
+                    </div>
+
+                    <div className="text-xs" style={{ color: "var(--muted)" }}>
+                      Misure salvate come: <span style={{ color: "var(--text)", fontWeight: 900 }}>{prettyDims(buildDims(editing.l, editing.p, editing.h))}</span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={saveEdit}
+                        className="rounded-2xl border px-4 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
+                        style={{ background: "var(--text)", borderColor: "var(--text)", color: "var(--bg)" }}
+                      >
+                        Salva
+                      </button>
+                      <button
+                        onClick={cancelEdit}
+                        className="rounded-2xl border px-4 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
+                        style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                      >
+                        Annulla
+                      </button>
+                    </div>
                   </div>
-                </div>
-
-                <button
-                  onClick={() => toggleStatus(p.id, p.status)}
-                  className="shrink-0 rounded-full border px-3 py-1 text-xs font-semibold"
-                  style={{
-                    background: p.status === "READY" ? "rgba(16,185,129,0.18)" : "rgba(234,179,8,0.18)",
-                    color: "var(--text)",
-                    borderColor: "var(--border)",
-                  }}
-                >
-                  {p.status === "READY" ? "Pronto" : "In completamento"}
-                </button>
+                )}
               </div>
             );
           })}
