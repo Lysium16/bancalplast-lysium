@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
-import { extractTripDate, fmtDateLabel, getOrCreateTripId, prettyDims } from "@/lib/trips";
+import { fetchTripDateMap, fmtDateLabel, getOrCreateTripId, prettyDims } from "@/lib/trips";
 
 type PalletRow = {
   id: string;
@@ -13,9 +13,9 @@ type PalletRow = {
   shipping_type: "TRUCK" | "COURIER";
   dimensions: string | null;
   trip_id: string | null;
-  trip: any; // trip:trip_id(trip_date) -> può essere object o array
   sent_at: string | null;
   created_at: string;
+  trip_date: string | null; // calcolata tramite mappa
 };
 
 export default function UfficioBancaliProntiPage() {
@@ -36,9 +36,7 @@ export default function UfficioBancaliProntiPage() {
 
     const res = await supabase
       .from("pallets")
-      .select(
-        "id, client, pallet_no, bobbins_count, status, shipping_type, dimensions, trip_id, sent_at, created_at, trip:trip_id(trip_date)"
-      )
+      .select("id, client, pallet_no, bobbins_count, status, shipping_type, dimensions, trip_id, sent_at, created_at")
       .eq("status", "READY")
       .is("sent_at", null)
       .order("created_at", { ascending: false });
@@ -46,10 +44,29 @@ export default function UfficioBancaliProntiPage() {
     if (res.error) {
       console.error(res.error);
       setItems([]);
-    } else {
-      setItems((res.data ?? []) as unknown as PalletRow[]);
+      setLoading(false);
+      return;
     }
 
+    const raw = (res.data ?? []) as any[];
+    const tripIds = raw.map(r => r.trip_id).filter(Boolean) as string[];
+    const tripMap = await fetchTripDateMap(tripIds);
+
+    const mapped: PalletRow[] = raw.map(r => ({
+      id: r.id,
+      client: r.client,
+      pallet_no: r.pallet_no,
+      bobbins_count: r.bobbins_count ?? 0,
+      status: r.status,
+      shipping_type: r.shipping_type,
+      dimensions: r.dimensions ?? null,
+      trip_id: r.trip_id ?? null,
+      sent_at: r.sent_at ?? null,
+      created_at: r.created_at,
+      trip_date: r.trip_id ? (tripMap.get(r.trip_id) ?? null) : null,
+    }));
+
+    setItems(mapped);
     setLoading(false);
   }
 
@@ -89,18 +106,13 @@ export default function UfficioBancaliProntiPage() {
 
     try {
       const tripId = await getOrCreateTripId(assignTripDate);
-
-      const { error } = await supabase
-        .from("pallets")
-        .update({ trip_id: tripId })
-        .in("id", selectedIds);
-
+      const { error } = await supabase.from("pallets").update({ trip_id: tripId }).in("id", selectedIds);
       if (error) throw error;
 
       await load();
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
-      alert("Errore assegnazione data (F12).");
+      alert(e?.message ?? "Errore assegnazione data (F12).");
     }
   }
 
@@ -108,15 +120,28 @@ export default function UfficioBancaliProntiPage() {
     if (selectedIds.length === 0) return alert("Seleziona almeno un bancale.");
     if (!confirm(`Inviare ${selectedIds.length} bancali? Verranno spostati tra gli spediti.`)) return;
 
-    const { error } = await supabase
-      .from("pallets")
-      .update({ sent_at: new Date().toISOString() })
-      .in("id", selectedIds);
+    const nowIso = new Date().toISOString();
 
+    // aggiorna sent_at sui bancali
+    const { error } = await supabase.from("pallets").update({ sent_at: nowIso }).in("id", selectedIds);
     if (error) {
       console.error(error);
       alert("Errore invio (F12).");
       return;
+    }
+
+    // set SHIPPED sui viaggi coinvolti (solo quelli con trip_id)
+    const tripIds = Array.from(
+      new Set(items.filter(p => selected[p.id] && p.trip_id).map(p => p.trip_id as string))
+    );
+
+    if (tripIds.length) {
+      const t = await supabase
+        .from("trips")
+        .update({ status: "SHIPPED", shipped_at: nowIso })
+        .in("id", tripIds);
+
+      if (t.error) console.error("Trip update error", t.error);
     }
 
     setSelected({});
@@ -143,7 +168,7 @@ export default function UfficioBancaliProntiPage() {
     if (!q) return items;
 
     return items.filter((p) => {
-      const td = extractTripDate(p.trip) ?? "";
+      const td = p.trip_date ?? "";
       return (
         p.client.toLowerCase().includes(q) ||
         p.pallet_no.toLowerCase().includes(q) ||
@@ -153,24 +178,21 @@ export default function UfficioBancaliProntiPage() {
     });
   }, [items, query]);
 
-  // raggruppo per data viaggio, poi dentro per cliente
   const grouped = useMemo(() => {
     const map = new Map<string, PalletRow[]>();
 
     for (const p of filtered) {
-      const td = extractTripDate(p.trip);
-      const key = td ? td : "SENZA_VIAGGIO";
+      const key = p.trip_date ? p.trip_date : "SENZA_VIAGGIO";
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(p);
     }
 
-    // ordina dentro ogni gruppo per cliente
     for (const [k, arr] of map.entries()) {
       arr.sort((a, b) => a.client.localeCompare(b.client));
       map.set(k, arr);
     }
 
-    // ordina i gruppi: prima "senza viaggio", poi date asc
+    // ordinamento gruppi: "senza viaggio" prima, poi date asc
     const keys = Array.from(map.keys());
     keys.sort((a, b) => {
       if (a === "SENZA_VIAGGIO") return -1;
@@ -190,7 +212,7 @@ export default function UfficioBancaliProntiPage() {
               Ufficio · Bancali pronti
             </h1>
             <p className="text-sm" style={{ color: "var(--muted)" }}>
-              Raggruppati per Data viaggio → Cliente. Misure corriere visibili. Nessuna modifica singola.
+              Raggruppati per Data viaggio → Cliente. Misure corriere visibili.
             </p>
           </div>
 
@@ -227,6 +249,7 @@ export default function UfficioBancaliProntiPage() {
             >
               Seleziona tutti
             </button>
+
             <button
               onClick={() => clearAllVisible(filtered)}
               className="rounded-2xl border px-3 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
@@ -241,7 +264,6 @@ export default function UfficioBancaliProntiPage() {
               onChange={(e) => setAssignTripDate(e.target.value)}
               className="rounded-2xl border px-3 py-2 text-xs shadow-sm focus:outline-none focus:ring-2"
               style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-              title="Data viaggio da assegnare ai selezionati"
             />
 
             <button
