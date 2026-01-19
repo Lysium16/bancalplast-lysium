@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
-import { fetchTripDateMap, fmtDateLabel, getOrCreateTripId, prettyDims } from "@/lib/trips";
+import { extractTripDate, fmtDateLabel, getOrCreateTripId, prettyDims } from "@/lib/trips";
 
 type PalletRow = {
   id: string;
@@ -15,7 +15,7 @@ type PalletRow = {
   trip_id: string | null;
   sent_at: string | null;
   created_at: string;
-  trip_date: string | null; // calcolata tramite mappa
+  trip_date: string | null;
 };
 
 export default function UfficioBancaliProntiPage() {
@@ -36,7 +36,19 @@ export default function UfficioBancaliProntiPage() {
 
     const res = await supabase
       .from("pallets")
-      .select("id, client, pallet_no, bobbins_count, status, shipping_type, dimensions, trip_id, sent_at, created_at")
+      .select(`
+        id,
+        client,
+        pallet_no,
+        bobbins_count,
+        status,
+        shipping_type,
+        dimensions,
+        trip_id,
+        sent_at,
+        created_at,
+        trips:trips ( trip_date )
+      `)
       .eq("status", "READY")
       .is("sent_at", null)
       .order("created_at", { ascending: false });
@@ -49,10 +61,8 @@ export default function UfficioBancaliProntiPage() {
     }
 
     const raw = (res.data ?? []) as any[];
-    const tripIds = raw.map(r => r.trip_id).filter(Boolean) as string[];
-    const tripMap = await fetchTripDateMap(tripIds);
 
-    const mapped: PalletRow[] = raw.map(r => ({
+    const mapped: PalletRow[] = raw.map((r) => ({
       id: r.id,
       client: r.client,
       pallet_no: r.pallet_no,
@@ -63,7 +73,7 @@ export default function UfficioBancaliProntiPage() {
       trip_id: r.trip_id ?? null,
       sent_at: r.sent_at ?? null,
       created_at: r.created_at,
-      trip_date: r.trip_id ? (tripMap.get(r.trip_id) ?? null) : null,
+      trip_date: extractTripDate(r.trips),
     }));
 
     setItems(mapped);
@@ -122,7 +132,6 @@ export default function UfficioBancaliProntiPage() {
 
     const nowIso = new Date().toISOString();
 
-    // aggiorna sent_at sui bancali
     const { error } = await supabase.from("pallets").update({ sent_at: nowIso }).in("id", selectedIds);
     if (error) {
       console.error(error);
@@ -130,17 +139,13 @@ export default function UfficioBancaliProntiPage() {
       return;
     }
 
-    // set SHIPPED sui viaggi coinvolti (solo quelli con trip_id)
+    // SHIPPED sui viaggi coinvolti (solo quelli con trip_id)
     const tripIds = Array.from(
-      new Set(items.filter(p => selected[p.id] && p.trip_id).map(p => p.trip_id as string))
+      new Set(items.filter((p) => selected[p.id] && p.trip_id).map((p) => p.trip_id as string))
     );
 
     if (tripIds.length) {
-      const t = await supabase
-        .from("trips")
-        .update({ status: "SHIPPED", shipped_at: nowIso })
-        .in("id", tripIds);
-
+      const t = await supabase.from("trips").update({ status: "SHIPPED", shipped_at: nowIso }).in("id", tripIds);
       if (t.error) console.error("Trip update error", t.error);
     }
 
@@ -192,7 +197,6 @@ export default function UfficioBancaliProntiPage() {
       map.set(k, arr);
     }
 
-    // ordinamento gruppi: "senza viaggio" prima, poi date asc
     const keys = Array.from(map.keys());
     keys.sort((a, b) => {
       if (a === "SENZA_VIAGGIO") return -1;
@@ -212,7 +216,7 @@ export default function UfficioBancaliProntiPage() {
               Ufficio · Bancali pronti
             </h1>
             <p className="text-sm" style={{ color: "var(--muted)" }}>
-              Raggruppati per Data viaggio → Cliente. Misure corriere visibili.
+              Raggruppati per Data viaggio → Cliente. Totale viaggio + riepilogo per cliente.
             </p>
           </div>
 
@@ -309,77 +313,135 @@ export default function UfficioBancaliProntiPage() {
       )}
 
       {!loading &&
-        grouped.map((g) => (
-          <section key={g.key} className="space-y-2">
-            <div className="text-sm font-semibold" style={{ color: "var(--text)" }}>
-              {g.key === "SENZA_VIAGGIO" ? "Senza viaggio" : `Viaggio: ${fmtDateLabel(g.key)}`}
-            </div>
+        grouped.map((g) => {
+          const totalPallets = g.items.length;
+          const totalBobbins = g.items.reduce((sum, p) => sum + (p.bobbins_count ?? 0), 0);
 
-            <div className="space-y-2">
-              {g.items.map((p) => (
-                <label
-                  key={p.id}
-                  className="flex items-start justify-between gap-4 rounded-3xl border p-5 shadow-sm"
-                  style={{ background: "var(--card)", borderColor: "var(--border)" }}
-                >
-                  <div className="flex items-start gap-3">
-                    <input
-                      type="checkbox"
-                      className="mt-1 h-5 w-5"
-                      checked={!!selected[p.id]}
-                      onChange={() => toggleOne(p.id)}
-                    />
+          const summary = (() => {
+            const m = new Map<string, { client: string; pallets: number; bobbins: number }>();
+            for (const p of g.items) {
+              const key = p.client;
+              const cur = m.get(key) ?? { client: key, pallets: 0, bobbins: 0 };
+              cur.pallets += 1;
+              cur.bobbins += (p.bobbins_count ?? 0);
+              m.set(key, cur);
+            }
+            return Array.from(m.values()).sort((a, b) => a.client.localeCompare(b.client));
+          })();
 
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <div className="truncate text-base font-semibold" style={{ color: "var(--text)" }}>
-                          {p.client}
-                        </div>
-
-                        <span
-                          className="rounded-full px-2 py-1 text-xs font-semibold"
-                          style={{
-                            background:
-                              p.shipping_type === "COURIER"
-                                ? "rgba(56,189,248,0.18)"
-                                : "rgba(148,163,184,0.18)",
-                            color: "var(--text)",
-                            border: "1px solid var(--border)",
-                          }}
-                        >
-                          {p.shipping_type === "COURIER" ? "Corriere" : "Camion"}
-                        </span>
-                      </div>
-
-                      <div className="mt-1 text-sm" style={{ color: "var(--muted)" }}>
-                        Bancale <span style={{ color: "var(--text)", fontWeight: 700 }}>{p.pallet_no}</span> · Bobine{" "}
-                        <span style={{ color: "var(--text)", fontWeight: 700 }}>{p.bobbins_count}</span>
-                      </div>
-
-                      {p.shipping_type === "COURIER" && (
-                        <div className="mt-2 text-xs" style={{ color: "var(--muted)" }}>
-                          Misure:{" "}
-                          <span style={{ color: "var(--text)", fontWeight: 800 }}>{prettyDims(p.dimensions)}</span>
-                        </div>
-                      )}
-                    </div>
+          return (
+            <section key={g.key} className="space-y-3">
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="text-sm font-semibold" style={{ color: "var(--text)" }}>
+                    {g.key === "SENZA_VIAGGIO" ? "Senza viaggio" : `Viaggio: ${fmtDateLabel(g.key)}`}
                   </div>
 
-                  <span
-                    className="shrink-0 rounded-full border px-3 py-1 text-xs font-semibold"
-                    style={{
-                      background: "rgba(16,185,129,0.18)",
-                      color: "var(--text)",
-                      borderColor: "var(--border)",
-                    }}
+                  <div
+                    className="rounded-2xl border px-3 py-1 text-xs font-semibold shadow-sm"
+                    style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--muted)" }}
                   >
-                    Pronto
-                  </span>
-                </label>
-              ))}
-            </div>
-          </section>
-        ))}
+                    {totalPallets} bancali
+                  </div>
+                </div>
+
+                <div
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border px-4 py-2 text-xs font-semibold shadow-sm"
+                  style={{ background: "var(--card)", borderColor: "var(--border)" }}
+                >
+                  <div style={{ color: "var(--muted)" }}>Totale viaggio</div>
+                  <div className="tabular-nums" style={{ color: "var(--text)" }}>
+                    <span style={{ fontWeight: 900 }}>{totalPallets}</span> bancali ·{" "}
+                    <span style={{ fontWeight: 900 }}>{totalBobbins}</span> bobine
+                  </div>
+                </div>
+
+                <div className="grid gap-2">
+                  {summary.map((r) => (
+                    <div
+                      key={r.client}
+                      className="flex items-center justify-between gap-3 rounded-2xl border px-4 py-2 text-xs shadow-sm"
+                      style={{ background: "var(--card)", borderColor: "var(--border)" }}
+                    >
+                      <div className="min-w-0 truncate font-semibold" style={{ color: "var(--text)" }}>
+                        {r.client}
+                      </div>
+
+                      <div className="shrink-0 tabular-nums" style={{ color: "var(--muted)" }}>
+                        <span style={{ color: "var(--text)", fontWeight: 900 }}>{r.pallets}</span> bancali ·{" "}
+                        <span style={{ color: "var(--text)", fontWeight: 900 }}>{r.bobbins}</span> bobine
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                {g.items.map((p) => (
+                  <label
+                    key={p.id}
+                    className="flex items-start justify-between gap-4 rounded-3xl border p-5 shadow-sm"
+                    style={{ background: "var(--card)", borderColor: "var(--border)" }}
+                  >
+                    <div className="flex items-start gap-3">
+                      <input
+                        type="checkbox"
+                        className="mt-1 h-5 w-5"
+                        checked={!!selected[p.id]}
+                        onChange={() => toggleOne(p.id)}
+                      />
+
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="truncate text-base font-semibold" style={{ color: "var(--text)" }}>
+                            {p.client}
+                          </div>
+
+                          <span
+                            className="rounded-full px-2 py-1 text-xs font-semibold"
+                            style={{
+                              background:
+                                p.shipping_type === "COURIER"
+                                  ? "rgba(56,189,248,0.18)"
+                                  : "rgba(148,163,184,0.18)",
+                              color: "var(--text)",
+                              border: "1px solid var(--border)",
+                            }}
+                          >
+                            {p.shipping_type === "COURIER" ? "Corriere" : "Camion"}
+                          </span>
+                        </div>
+
+                        <div className="mt-1 text-sm" style={{ color: "var(--muted)" }}>
+                          Bancale <span style={{ color: "var(--text)", fontWeight: 800 }}>{p.pallet_no}</span> · Bobine{" "}
+                          <span style={{ color: "var(--text)", fontWeight: 800 }}>{p.bobbins_count}</span>
+                        </div>
+
+                        {p.shipping_type === "COURIER" && (
+                          <div className="mt-2 text-xs" style={{ color: "var(--muted)" }}>
+                            Misure:{" "}
+                            <span style={{ color: "var(--text)", fontWeight: 900 }}>{prettyDims(p.dimensions)}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <span
+                      className="shrink-0 rounded-full border px-3 py-1 text-xs font-semibold"
+                      style={{
+                        background: "rgba(16,185,129,0.18)",
+                        color: "var(--text)",
+                        borderColor: "var(--border)",
+                      }}
+                    >
+                      Pronto
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </section>
+          );
+        })}
     </main>
   );
 }
