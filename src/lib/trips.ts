@@ -51,6 +51,16 @@ export async function fetchTripDateMap(tripIds: string[]) {
   return m;
 }
 
+
+/**
+ * Compat: alcune pagine vecchie usavano join a trips e ricevevano
+ * a volte un oggetto, a volte un array. Questa funzione normalizza.
+ */
+export function extractTripDate(tripRel: any): string | null {
+  if (!tripRel) return null;
+  if (Array.isArray(tripRel)) return tripRel[0]?.trip_date ?? null;
+  return tripRel.trip_date ?? null;
+}
 export function fmtDateLabel(d: string | null | undefined) {
   if (!d) return "—";
   const raw = String(d);
