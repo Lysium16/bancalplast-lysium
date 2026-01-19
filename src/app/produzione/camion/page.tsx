@@ -39,6 +39,9 @@ export default function ProduzioneCamionPage() {
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<Editing | null>(null);
 
+  // Modal telefono
+  const [mobileOpen, setMobileOpen] = useState(false);
+
   async function load() {
     setLoading(true);
 
@@ -95,11 +98,11 @@ export default function ProduzioneCamionPage() {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return items;
-    return items.filter((p) => {
-      const td = p.trip_date ?? "";
+    return items.filter((x) => {
+      const td = x.trip_date ?? "";
       return (
-        p.client.toLowerCase().includes(q) ||
-        p.pallet_no.toLowerCase().includes(q) ||
+        x.client.toLowerCase().includes(q) ||
+        x.pallet_no.toLowerCase().includes(q) ||
         td.toLowerCase().includes(q)
       );
     });
@@ -116,14 +119,12 @@ export default function ProduzioneCamionPage() {
     const pn = palletNo.trim();
     const bc = parseInt(bobbinsCount, 10);
 
-    if (!c) return alert("Inserisci il cliente.");
-    if (!pn) return alert("Inserisci il numero bancale.");
-    if (!Number.isFinite(bc) || bc < 0) return alert("Numero bobine non valido.");
+    if (!c) { alert("Inserisci il cliente."); return false; }
+    if (!pn) { alert("Inserisci il numero bancale."); return false; }
+    if (!Number.isFinite(bc) || bc < 0) { alert("Numero bobine non valido."); return false; }
 
     let trip_id: string | null = null;
-    if (tripDate) {
-      trip_id = await getOrCreateTripId(tripDate);
-    }
+    if (tripDate) trip_id = await getOrCreateTripId(tripDate);
 
     const { error } = await supabase.from("pallets").insert({
       client: c,
@@ -137,31 +138,28 @@ export default function ProduzioneCamionPage() {
     if (error) {
       console.error(error);
       alert("Errore inserimento (F12).");
-      return;
+      return false;
     }
 
     setClient("");
     setPalletNo("");
     setBobbinsCount("0");
     setStatus("IN_PROGRESS");
-    // tripDate lo lasciamo com'è: spesso si inseriscono più bancali sullo stesso viaggio
+    setTripDate("");
 
     await load();
+    return true;
   }
 
-  function startEdit(p: Pallet) {
+  function startEdit(pal: Pallet) {
     setEditing({
-      id: p.id,
-      client: p.client,
-      pallet_no: p.pallet_no,
-      bobbins_count: String(p.bobbins_count ?? 0),
-      status: p.status,
-      trip_date: p.trip_date ?? "",
+      id: pal.id,
+      client: pal.client,
+      pallet_no: pal.pallet_no,
+      bobbins_count: String(pal.bobbins_count ?? 0),
+      status: pal.status,
+      trip_date: pal.trip_date ?? "",
     });
-  }
-
-  function cancelEdit() {
-    setEditing(null);
   }
 
   async function saveEdit() {
@@ -176,9 +174,7 @@ export default function ProduzioneCamionPage() {
     if (!Number.isFinite(bc) || bc < 0) return alert("Numero bobine non valido.");
 
     let trip_id: string | null = null;
-    if (editing.trip_date) {
-      trip_id = await getOrCreateTripId(editing.trip_date);
-    }
+    if (editing.trip_date) trip_id = await getOrCreateTripId(editing.trip_date);
 
     const { error } = await supabase
       .from("pallets")
@@ -216,9 +212,7 @@ export default function ProduzioneCamionPage() {
   }
 
   const pill = (s: "IN_PROGRESS" | "READY") => {
-    if (s === "READY") {
-      return { text: "Pronto", bg: "rgba(16,185,129,0.18)" };
-    }
+    if (s === "READY") return { text: "Pronto", bg: "rgba(16,185,129,0.18)" };
     return { text: "In completamento", bg: "rgba(250,204,21,0.22)" };
   };
 
@@ -231,21 +225,34 @@ export default function ProduzioneCamionPage() {
               Produzione · Camion
             </h1>
             <p className="text-sm" style={{ color: "var(--muted)" }}>
-              Inserisci bancali e aggiorna lo stato. Modifica ed elimina sono disponibili.
+              Inserisci bancali camion. Modifica ed elimina sono disponibili.
             </p>
           </div>
 
-          <button
-            onClick={load}
-            className="rounded-2xl border px-4 py-2 text-sm font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
-            style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-          >
-            Aggiorna
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={load}
+              className="rounded-2xl border px-4 py-2 text-sm font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+            >
+              Aggiorna
+            </button>
+
+            <button
+              onClick={() => setMobileOpen(true)}
+              className="rounded-2xl border px-4 py-2 text-sm font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
+              style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+              title="Inserimento rapido da telefono"
+            >
+              📱
+            </button>
+          </div>
         </div>
 
-        <div className="grid gap-3 rounded-3xl border p-4 shadow-sm"
-             style={{ background: "var(--card)", borderColor: "var(--border)" }}>
+        <div
+          className="grid gap-3 rounded-3xl border p-4 shadow-sm"
+          style={{ background: "var(--card)", borderColor: "var(--border)" }}
+        >
           <div className="grid gap-3 md:grid-cols-2">
             <input
               className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
@@ -300,7 +307,7 @@ export default function ProduzioneCamionPage() {
             className="rounded-2xl border px-4 py-3 text-sm font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
             style={{ background: "var(--text)", borderColor: "var(--text)", color: "var(--bg)" }}
           >
-            Aggiungi bancale
+            Aggiungi bancale camion
           </button>
 
           <div className="text-xs" style={{ color: "var(--muted)" }}>
@@ -311,7 +318,7 @@ export default function ProduzioneCamionPage() {
         <input
           className="w-full rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
           style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
-          placeholder="Cerca cliente / bancale / data viaggio…"
+          placeholder="Cerca cliente / bancale / data…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -320,40 +327,48 @@ export default function ProduzioneCamionPage() {
       {loading && <div className="text-sm" style={{ color: "var(--muted)" }}>Caricamento…</div>}
 
       {!loading && ordered.length === 0 && (
-        <div className="rounded-3xl border p-6 text-sm shadow-sm"
-             style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--muted)" }}>
+        <div
+          className="rounded-3xl border p-6 text-sm shadow-sm"
+          style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--muted)" }}
+        >
           Nessun bancale camion.
         </div>
       )}
 
       {!loading && ordered.length > 0 && (
         <div className="space-y-2">
-          {ordered.map((p) => {
-            const st = pill(p.status);
-            const isEdit = editing?.id === p.id;
+          {ordered.map((pal) => {
+            const st = pill(pal.status);
+            const isEdit = editing?.id === pal.id;
 
             return (
-              <div key={p.id} className="rounded-3xl border p-5 shadow-sm"
-                   style={{ background: "var(--card)", borderColor: "var(--border)" }}>
+              <div
+                key={pal.id}
+                className="rounded-3xl border p-5 shadow-sm"
+                style={{ background: "var(--card)", borderColor: "var(--border)" }}
+              >
                 {!isEdit ? (
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <div className="truncate text-base font-semibold" style={{ color: "var(--text)" }}>
-                          {p.client}
+                          {pal.client}
                         </div>
-                        <span className="rounded-full border px-3 py-1 text-xs font-semibold"
-                              style={{ background: st.bg, borderColor: "var(--border)", color: "var(--text)" }}>
+
+                        <span
+                          className="rounded-full border px-3 py-1 text-xs font-semibold"
+                          style={{ background: st.bg, borderColor: "var(--border)", color: "var(--text)" }}
+                        >
                           {st.text}
                         </span>
                       </div>
 
                       <div className="mt-1 text-sm" style={{ color: "var(--muted)" }}>
-                        Bancale <span style={{ color: "var(--text)", fontWeight: 800 }}>{p.pallet_no}</span> · Bobine{" "}
-                        <span style={{ color: "var(--text)", fontWeight: 800 }}>{p.bobbins_count}</span>
-                        {p.trip_date && (
+                        Bancale <span style={{ color: "var(--text)", fontWeight: 800 }}>{pal.pallet_no}</span> · Bobine{" "}
+                        <span style={{ color: "var(--text)", fontWeight: 800 }}>{pal.bobbins_count}</span>
+                        {pal.trip_date && (
                           <>
-                            {" "}· Viaggio <span style={{ color: "var(--text)", fontWeight: 800 }}>{fmtDateLabel(p.trip_date)}</span>
+                            {" "}· Viaggio <span style={{ color: "var(--text)", fontWeight: 800 }}>{fmtDateLabel(pal.trip_date)}</span>
                           </>
                         )}
                       </div>
@@ -361,14 +376,15 @@ export default function ProduzioneCamionPage() {
 
                     <div className="flex shrink-0 items-center gap-2">
                       <button
-                        onClick={() => startEdit(p)}
+                        onClick={() => startEdit(pal)}
                         className="rounded-2xl border px-3 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
                         style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
                       >
                         Modifica
                       </button>
+
                       <button
-                        onClick={() => deleteOne(p.id)}
+                        onClick={() => deleteOne(pal.id)}
                         className="rounded-2xl border px-3 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
                         style={{ background: "var(--card)", borderColor: "#ef4444", color: "#ef4444" }}
                       >
@@ -378,21 +394,23 @@ export default function ProduzioneCamionPage() {
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    <div className="text-sm font-semibold" style={{ color: "var(--text)" }}>Modifica bancale</div>
+                    <div className="text-sm font-semibold" style={{ color: "var(--text)" }}>
+                      Modifica bancale camion
+                    </div>
 
                     <div className="grid gap-3 md:grid-cols-2">
                       <input
                         className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
                         style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
                         value={editing.client}
-                        onChange={(e) => setEditing((s) => s ? ({ ...s, client: e.target.value }) : s)}
+                        onChange={(e) => setEditing((s) => (s ? { ...s, client: e.target.value } : s))}
                         placeholder="Cliente"
                       />
                       <input
                         className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
                         style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
                         value={editing.pallet_no}
-                        onChange={(e) => setEditing((s) => s ? ({ ...s, pallet_no: e.target.value }) : s)}
+                        onChange={(e) => setEditing((s) => (s ? { ...s, pallet_no: e.target.value } : s))}
                         placeholder="N. bancale"
                       />
                     </div>
@@ -404,7 +422,7 @@ export default function ProduzioneCamionPage() {
                         className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
                         style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
                         value={editing.bobbins_count}
-                        onChange={(e) => setEditing((s) => s ? ({ ...s, bobbins_count: e.target.value }) : s)}
+                        onChange={(e) => setEditing((s) => (s ? { ...s, bobbins_count: e.target.value } : s))}
                         placeholder="N. bobine"
                       />
 
@@ -412,7 +430,7 @@ export default function ProduzioneCamionPage() {
                         className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
                         style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
                         value={editing.status}
-                        onChange={(e) => setEditing((s) => s ? ({ ...s, status: e.target.value as any }) : s)}
+                        onChange={(e) => setEditing((s) => (s ? { ...s, status: e.target.value as any } : s))}
                       >
                         <option value="IN_PROGRESS">In completamento</option>
                         <option value="READY">Pronto</option>
@@ -423,7 +441,7 @@ export default function ProduzioneCamionPage() {
                         className="rounded-2xl border px-4 py-3 text-sm shadow-sm focus:outline-none focus:ring-2"
                         style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
                         value={editing.trip_date}
-                        onChange={(e) => setEditing((s) => s ? ({ ...s, trip_date: e.target.value }) : s)}
+                        onChange={(e) => setEditing((s) => (s ? { ...s, trip_date: e.target.value } : s))}
                         title="Data viaggio (opzionale)"
                       />
                     </div>
@@ -437,7 +455,7 @@ export default function ProduzioneCamionPage() {
                         Salva
                       </button>
                       <button
-                        onClick={cancelEdit}
+                        onClick={() => setEditing(null)}
                         className="rounded-2xl border px-4 py-2 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
                         style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
                       >
@@ -449,6 +467,102 @@ export default function ProduzioneCamionPage() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {mobileOpen && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center md:items-center">
+          <div
+            className="absolute inset-0"
+            style={{ background: "rgba(0,0,0,0.45)" }}
+            onClick={() => setMobileOpen(false)}
+          />
+
+          <div
+            className="relative w-full max-w-xl rounded-t-3xl border p-5 shadow-2xl md:rounded-3xl"
+            style={{ background: "var(--card)", borderColor: "var(--border)" }}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-base font-semibold" style={{ color: "var(--text)" }}>
+                  Inserimento rapido
+                </div>
+                <div className="text-xs" style={{ color: "var(--muted)" }}>
+                  Pensato per telefono: campi grandi, un solo tasto.
+                </div>
+              </div>
+
+              <button
+                onClick={() => setMobileOpen(false)}
+                className="rounded-2xl border px-3 py-2 text-xs font-semibold shadow-sm"
+                style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+              >
+                Chiudi
+              </button>
+            </div>
+
+            <div className="mt-4 grid gap-3">
+              <input
+                className="rounded-2xl border px-4 py-4 text-base shadow-sm focus:outline-none focus:ring-2"
+                style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                placeholder="Cliente"
+                value={client}
+                onChange={(e) => setClient(e.target.value)}
+              />
+              <input
+                className="rounded-2xl border px-4 py-4 text-base shadow-sm focus:outline-none focus:ring-2"
+                style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                placeholder="N. bancale"
+                value={palletNo}
+                onChange={(e) => setPalletNo(e.target.value)}
+              />
+              <input
+                type="number"
+                min="0"
+                className="rounded-2xl border px-4 py-4 text-base shadow-sm focus:outline-none focus:ring-2"
+                style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                placeholder="N. bobine"
+                value={bobbinsCount}
+                onChange={(e) => setBobbinsCount(e.target.value)}
+              />
+
+              <div className="grid grid-cols-2 gap-3">
+                <select
+                  className="rounded-2xl border px-4 py-4 text-base shadow-sm focus:outline-none focus:ring-2"
+                  style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                  value={status}
+                  onChange={(e) => setStatus(e.target.value as any)}
+                >
+                  <option value="IN_PROGRESS">In completamento</option>
+                  <option value="READY">Pronto</option>
+                </select>
+
+                <input
+                  type="date"
+                  className="rounded-2xl border px-4 py-4 text-base shadow-sm focus:outline-none focus:ring-2"
+                  style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--text)" }}
+                  value={tripDate}
+                  onChange={(e) => setTripDate(e.target.value)}
+                  title="Data viaggio (opzionale)"
+                />
+              </div>
+
+              <button
+                onClick={async () => {
+                  const ok = await createPallet();
+                  if (ok) setMobileOpen(false);
+                }}
+                className="rounded-2xl border px-4 py-4 text-base font-semibold shadow-sm hover:opacity-95 active:scale-[0.99]"
+                style={{ background: "var(--text)", borderColor: "var(--text)", color: "var(--bg)" }}
+              >
+                Aggiungi bancale
+              </button>
+
+              <div className="text-xs" style={{ color: "var(--muted)" }}>
+                Tip: salva questa pagina tra i Preferiti.
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </main>
