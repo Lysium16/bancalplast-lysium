@@ -304,7 +304,7 @@ export default function ProduzioneCamionPage() {
           </button>
 
           <div className="text-xs" style={{ color: "var(--muted)" }}>
-            Per Filippo: <span style={{ color: "var(--text)", fontWeight: 700 }}>un bancale alla volta, ma fatto bene.</span>
+            Per Filippo: <span style={{ color: "var(--text)", fontWeight: 800 }}>qui non facciamo arte astratta: numeri chiari, bancali chiari.</span>
           </div>
         </div>
 
