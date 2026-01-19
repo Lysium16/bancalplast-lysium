@@ -139,7 +139,7 @@ export default function UfficioBancaliProntiPage() {
       return;
     }
 
-    // SHIPPED sui viaggi coinvolti (solo quelli con trip_id)
+    // Aggiorna viaggi coinvolti (SHIPPED)
     const tripIds = Array.from(
       new Set(items.filter((p) => selected[p.id] && p.trip_id).map((p) => p.trip_id as string))
     );
@@ -297,27 +297,22 @@ export default function UfficioBancaliProntiPage() {
         </div>
       </header>
 
-      {loading && (
-        <div className="text-sm" style={{ color: "var(--muted)" }}>
-          Caricamento…
-        </div>
-      )}
+      {loading && <div className="text-sm" style={{ color: "var(--muted)" }}>Caricamento…</div>}
 
       {!loading && grouped.length === 0 && (
-        <div
-          className="rounded-3xl border p-6 text-sm shadow-sm"
-          style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--muted)" }}
-        >
+        <div className="rounded-3xl border p-6 text-sm shadow-sm" style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--muted)" }}>
           Nessun bancale pronto.
         </div>
       )}
 
       {!loading &&
         grouped.map((g) => {
+          // Totale viaggio
           const totalPallets = g.items.length;
           const totalBobbins = g.items.reduce((sum, p) => sum + (p.bobbins_count ?? 0), 0);
 
-          const summary = (() => {
+          // Riepilogo per cliente: (n bancali, n bobine)
+          const summaryByClient = (() => {
             const m = new Map<string, { client: string; pallets: number; bobbins: number }>();
             for (const p of g.items) {
               const key = p.client;
@@ -337,18 +332,14 @@ export default function UfficioBancaliProntiPage() {
                     {g.key === "SENZA_VIAGGIO" ? "Senza viaggio" : `Viaggio: ${fmtDateLabel(g.key)}`}
                   </div>
 
-                  <div
-                    className="rounded-2xl border px-3 py-1 text-xs font-semibold shadow-sm"
-                    style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--muted)" }}
-                  >
+                  <div className="rounded-2xl border px-3 py-1 text-xs font-semibold shadow-sm"
+                       style={{ background: "var(--card)", borderColor: "var(--border)", color: "var(--muted)" }}>
                     {totalPallets} bancali
                   </div>
                 </div>
 
-                <div
-                  className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border px-4 py-2 text-xs font-semibold shadow-sm"
-                  style={{ background: "var(--card)", borderColor: "var(--border)" }}
-                >
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border px-4 py-2 text-xs font-semibold shadow-sm"
+                     style={{ background: "var(--card)", borderColor: "var(--border)" }}>
                   <div style={{ color: "var(--muted)" }}>Totale viaggio</div>
                   <div className="tabular-nums" style={{ color: "var(--text)" }}>
                     <span style={{ fontWeight: 900 }}>{totalPallets}</span> bancali ·{" "}
@@ -357,12 +348,10 @@ export default function UfficioBancaliProntiPage() {
                 </div>
 
                 <div className="grid gap-2">
-                  {summary.map((r) => (
-                    <div
-                      key={r.client}
-                      className="flex items-center justify-between gap-3 rounded-2xl border px-4 py-2 text-xs shadow-sm"
-                      style={{ background: "var(--card)", borderColor: "var(--border)" }}
-                    >
+                  {summaryByClient.map((r) => (
+                    <div key={r.client}
+                         className="flex items-center justify-between gap-3 rounded-2xl border px-4 py-2 text-xs shadow-sm"
+                         style={{ background: "var(--card)", borderColor: "var(--border)" }}>
                       <div className="min-w-0 truncate font-semibold" style={{ color: "var(--text)" }}>
                         {r.client}
                       </div>
@@ -378,18 +367,12 @@ export default function UfficioBancaliProntiPage() {
 
               <div className="space-y-2">
                 {g.items.map((p) => (
-                  <label
-                    key={p.id}
-                    className="flex items-start justify-between gap-4 rounded-3xl border p-5 shadow-sm"
-                    style={{ background: "var(--card)", borderColor: "var(--border)" }}
-                  >
+                  <label key={p.id}
+                         className="flex items-start justify-between gap-4 rounded-3xl border p-5 shadow-sm"
+                         style={{ background: "var(--card)", borderColor: "var(--border)" }}>
                     <div className="flex items-start gap-3">
-                      <input
-                        type="checkbox"
-                        className="mt-1 h-5 w-5"
-                        checked={!!selected[p.id]}
-                        onChange={() => toggleOne(p.id)}
-                      />
+                      <input type="checkbox" className="mt-1 h-5 w-5"
+                             checked={!!selected[p.id]} onChange={() => toggleOne(p.id)} />
 
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
@@ -397,17 +380,12 @@ export default function UfficioBancaliProntiPage() {
                             {p.client}
                           </div>
 
-                          <span
-                            className="rounded-full px-2 py-1 text-xs font-semibold"
-                            style={{
-                              background:
-                                p.shipping_type === "COURIER"
-                                  ? "rgba(56,189,248,0.18)"
-                                  : "rgba(148,163,184,0.18)",
-                              color: "var(--text)",
-                              border: "1px solid var(--border)",
-                            }}
-                          >
+                          <span className="rounded-full px-2 py-1 text-xs font-semibold"
+                                style={{
+                                  background: p.shipping_type === "COURIER" ? "rgba(56,189,248,0.18)" : "rgba(148,163,184,0.18)",
+                                  color: "var(--text)",
+                                  border: "1px solid var(--border)",
+                                }}>
                             {p.shipping_type === "COURIER" ? "Corriere" : "Camion"}
                           </span>
                         </div>
@@ -426,14 +404,8 @@ export default function UfficioBancaliProntiPage() {
                       </div>
                     </div>
 
-                    <span
-                      className="shrink-0 rounded-full border px-3 py-1 text-xs font-semibold"
-                      style={{
-                        background: "rgba(16,185,129,0.18)",
-                        color: "var(--text)",
-                        borderColor: "var(--border)",
-                      }}
-                    >
+                    <span className="shrink-0 rounded-full border px-3 py-1 text-xs font-semibold"
+                          style={{ background: "rgba(16,185,129,0.18)", color: "var(--text)", borderColor: "var(--border)" }}>
                       Pronto
                     </span>
                   </label>
