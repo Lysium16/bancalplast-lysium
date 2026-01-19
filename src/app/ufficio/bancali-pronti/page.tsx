@@ -295,7 +295,11 @@ export default function UfficioBancaliProntiPage() {
             </button>
           </div>
         </div>
-      </header>
+      <div className="text-xs mt-2" style={{ color: "var(--muted)" }}>
+  <span style={{ color: "var(--text)", fontWeight: 800 }}>
+    Le bolle preferiscono i numeri alle emozioni. Anche quando contano Geppo e Filippo.
+  </span>
+</div></header>
 
       {loading && <div className="text-sm" style={{ color: "var(--muted)" }}>Caricamento…</div>}
 
